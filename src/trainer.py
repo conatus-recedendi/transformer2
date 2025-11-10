@@ -9,6 +9,7 @@ import time
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 import json
+from torch.cuda.amp import autocast, GradScaler
 
 from .model import Transformer
 from .data_utils import create_tokenizer, create_token_based_data_loader, save_tokenizer
@@ -53,8 +54,11 @@ class TransformerTrainer:
         self.optimizer = None
         self.criterion = None
         self.scheduler = None
+        self.scaler = GradScaler() if self.device.type == 'cuda' else None  # Mixed precision용
+        self.use_amp = self.device.type == 'cuda'  # CUDA일 때만 AMP 사용
         
         print(f"Trainer initialized with device: {self.device}")
+        print(f"Mixed Precision (AMP): {'Enabled' if self.use_amp else 'Disabled'}")
         print(f"Model config: {config.get('description', 'Custom config')}")
         
     def prepare_data(self):
@@ -164,7 +168,33 @@ class TransformerTrainer:
         
         print(f"Total parameters: {total_params:,}")
         print(f"Trainable parameters: {trainable_params:,}")
-        print(f"Model size (MB): {total_params * 4 / (1024**2):.2f}")
+        print(f"Model size (FP32): {total_params * 4 / (1024**2):.2f} MB")
+        print(f"Model size (FP16): {total_params * 2 / (1024**2):.2f} MB")
+        
+        # 예상 VRAM 사용량 계산
+        model_memory = total_params * 2 / (1024**2) if self.use_amp else total_params * 4 / (1024**2)  # FP16/FP32
+        gradient_memory = model_memory  # 그래디언트
+        optimizer_memory = model_memory * 2  # Adam: momentum + velocity
+        estimated_vram = (model_memory + gradient_memory + optimizer_memory) * 1.3  # 활성화 + 오버헤드
+        
+        print(f"Estimated VRAM usage ({'FP16' if self.use_amp else 'FP32'}): {estimated_vram:.0f} MB")
+        if self.use_amp:
+            print("💡 Mixed Precision Training enabled - significant VRAM savings!")
+        else:
+            print("💡 Consider enabling CUDA for Mixed Precision Training to save VRAM")
+        
+        # 예상 VRAM 사용량 계산 (대략적)
+        model_memory = total_params * 4 / (1024**2)  # FP32 기준
+        gradient_memory = model_memory  # 그래디언트
+        optimizer_memory = model_memory * 2  # Adam: momentum + velocity
+        estimated_vram = (model_memory + gradient_memory + optimizer_memory) * 1.5  # 활성화 + 오버헤드
+        
+        print(f"Estimated VRAM usage: {estimated_vram:.0f} MB (excluding batch data)")
+        print("💡 VRAM optimization tips:")
+        print("   - Use gradient checkpointing: model.gradient_checkpointing_enable()")
+        print("   - Use mixed precision: torch.cuda.amp.autocast()")
+        print("   - Reduce batch_tokens size")
+        print("   - Use gradient accumulation")
         
     def setup_training(self):
         """학습 설정"""
@@ -197,7 +227,7 @@ class TransformerTrainer:
         self.scheduler = optim.lr_scheduler.LambdaLR(self.optimizer, lr_lambda)
         
     def evaluate(self, max_batches=20):
-        """평가 (제한된 배치 수로)"""
+        """평가 (제한된 배치 수로, Mixed Precision 지원)"""
         self.model.eval()
         total_loss = 0
         num_batches = 0
@@ -211,8 +241,14 @@ class TransformerTrainer:
                 tgt_input = batch['tgt_input'].to(self.device)
                 tgt_output = batch['tgt_output'].to(self.device)
                 
-                output = self.model(src, tgt_input, src_pad_idx=0, tgt_pad_idx=0)
-                loss = self.criterion(output, tgt_output)
+                # Mixed precision으로 평가
+                if self.use_amp:
+                    with autocast():
+                        output = self.model(src, tgt_input, src_pad_idx=0, tgt_pad_idx=0)
+                        loss = self.criterion(output, tgt_output)
+                else:
+                    output = self.model(src, tgt_input, src_pad_idx=0, tgt_pad_idx=0)
+                    loss = self.criterion(output, tgt_output)
                 
                 total_loss += loss.item()
                 num_batches += 1
@@ -261,14 +297,28 @@ class TransformerTrainer:
             
             self.optimizer.zero_grad()
             
-            output = self.model(src, tgt_input, src_pad_idx=0, tgt_pad_idx=0)
-            loss = self.criterion(output, tgt_output)
+            # Mixed Precision Training
+            if self.use_amp:
+                with autocast():
+                    output = self.model(src, tgt_input, src_pad_idx=0, tgt_pad_idx=0)
+                    loss = self.criterion(output, tgt_output)
+                
+                # Scaled backward pass
+                self.scaler.scale(loss).backward()
+                self.scaler.unscale_(self.optimizer)
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), training_config['grad_clip'])
+                self.scaler.step(self.optimizer)
+                self.scaler.update()
+            else:
+                # 일반 FP32 학습
+                output = self.model(src, tgt_input, src_pad_idx=0, tgt_pad_idx=0)
+                loss = self.criterion(output, tgt_output)
+                
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), training_config['grad_clip'])
+                self.optimizer.step()
             
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), training_config['grad_clip'])
-            self.optimizer.step()
             self.scheduler.step()
-            
             running_loss += loss.item()
             
             # 주기적 로그 출력
