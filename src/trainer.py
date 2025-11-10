@@ -11,8 +11,9 @@ import matplotlib.pyplot as plt
 import json
 
 from .model import Transformer
-from .data_utils import create_tokenizer, create_token_based_data_loader, prepare_sample_data, save_tokenizer
+from .data_utils import create_tokenizer, create_token_based_data_loader, save_tokenizer
 from .bpe_adapter import create_bpe_tokenizers, create_bpe_token_based_data_loader, save_bpe_tokenizers
+from .data_loader import load_problem_data, clean_sentence_pairs
 
 
 class LabelSmoothingLoss(nn.Module):
@@ -57,20 +58,46 @@ class TransformerTrainer:
         print(f"Model config: {config.get('description', 'Custom config')}")
         
     def prepare_data(self):
-        """데이터 준비 (BPE 토크나이저 사용)"""
+        """데이터 준비 (실제 데이터 파일 사용, BPE 토크나이저)"""
         print("Preparing data with BPE tokenizers...")
-        src_texts, tgt_texts = prepare_sample_data()
         
-        # config에서 데이터 설정 가져오기
+        # 실제 데이터 로드
+        train_data, val_data, test_data = load_problem_data(self.config)
+        train_src, train_tgt = train_data
+        val_src, val_tgt = val_data
+        
+        print(f"Loaded data:")
+        print(f"  - Train pairs: {len(train_src):,}")
+        print(f"  - Valid pairs: {len(val_src):,}")
+        print(f"  - Test pairs: {len(test_data[0]):,}")
+        
+        # 데이터 클리닝 적용 (config 설정에 따라)
         data_config = self.config['data']
-        data_multiplier = data_config['data_multiplier']
-        max_length = data_config['max_length']
+        if data_config.get('apply_cleaning', True):
+            print("Applying data cleaning...")
+            train_src, train_tgt = clean_sentence_pairs(train_src, train_tgt)
+            val_src, val_tgt = clean_sentence_pairs(val_src, val_tgt)
+            
+            print(f"After cleaning:")
+            print(f"  - Train pairs: {len(train_src):,}")
+            print(f"  - Valid pairs: {len(val_src):,}")
         
-        # 데이터 확장
-        train_src = src_texts * data_multiplier
-        train_tgt = tgt_texts * data_multiplier
-        val_src = src_texts
-        val_tgt = tgt_texts
+        # 빈 데이터 확인
+        if not train_src or not train_tgt:
+            print("⚠️  No training data found! Creating sample data for testing...")
+            from .data_loader import create_data_sample_for_testing
+            
+            # 샘플 데이터 생성
+            create_data_sample_for_testing()
+            
+            # 다시 로드
+            train_data, val_data, test_data = load_problem_data(self.config)
+            train_src, train_tgt = train_data
+            val_src, val_tgt = val_data
+            
+            print(f"Using sample data:")
+            print(f"  - Train pairs: {len(train_src):,}")
+            print(f"  - Valid pairs: {len(val_src):,}")
         
         # BPE 토크나이저 생성/로드
         print("Creating/Loading BPE tokenizers...")
@@ -81,6 +108,8 @@ class TransformerTrainer:
         
         # BPE 기반 토큰 데이터 로더 생성
         batch_tokens = self.config['training']['batch_tokens']
+        max_length = data_config['max_length']
+        
         print(f"Creating BPE token-based data loaders with {batch_tokens} tokens per batch...")
         
         self.train_loader = create_bpe_token_based_data_loader(

@@ -56,19 +56,12 @@ class BPEVocabulary:
 
         logger.info(f"Total lines for BPE training: {total_lines}")
 
-        # 실제 필요한 vocab_size 계산 (데이터 크기에 따라 조정)
-        # 작은 데이터셋의 경우 vocab_size를 자동으로 줄임
-        estimated_vocab = min(vocab_size, total_lines // 2 + 100)  # 보수적 추정
-        actual_vocab_size = max(estimated_vocab, 1000)  # 최소 1000개 보장
-        
-        if actual_vocab_size < vocab_size:
-            logger.warning(f"Reducing vocab_size from {vocab_size} to {actual_vocab_size} due to small dataset")
-        
+
         # BPE 모델 훈련
         spm.SentencePieceTrainer.train(
             input=combined_file,
             model_prefix=model_prefix,
-            vocab_size=actual_vocab_size,
+            vocab_size=self.vocab_size,
             character_coverage=0.995,
             model_type="bpe",
             # 특수 토큰 ID를 명확히 분리하여 설정

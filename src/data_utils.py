@@ -208,19 +208,5 @@ def load_translation_data(file_path):
     
     return src_texts, tgt_texts
 
-def prepare_sample_data():
-    """샘플 번역 데이터 생성 (영어-한국어)"""
-    sample_data = [
-        {"src": "Hello, how are you?", "tgt": "안녕하세요, 어떻게 지내세요?"},
-        {"src": "I love machine learning.", "tgt": "저는 머신러닝을 사랑합니다."},
-        {"src": "The weather is nice today.", "tgt": "오늘 날씨가 좋네요."},
-        {"src": "What time is it?", "tgt": "몇 시인가요?"},
-        {"src": "I am studying artificial intelligence.", "tgt": "저는 인공지능을 공부하고 있습니다."},
-        {"src": "This is a beautiful day.", "tgt": "정말 아름다운 날이네요."},
-        {"src": "Can you help me?", "tgt": "도와주실 수 있나요?"},
-        {"src": "I enjoy reading books.", "tgt": "저는 책 읽는 것을 좋아합니다."},
-        {"src": "The food was delicious.", "tgt": "음식이 맛있었습니다."},
-        {"src": "Thank you very much.", "tgt": "정말 감사합니다."}
-    ]
-    
-    return [item['src'] for item in sample_data], [item['tgt'] for item in sample_data]
+# prepare_sample_data 함수는 더미 데이터를 위한 것으로 
+# 실제 데이터 사용을 위해 src/data_loader.py로 이동되었습니다.

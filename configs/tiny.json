@@ -20,9 +20,13 @@
     "save_every": 500
   },
   "data": {
+    "problem": "sample_en_de",
+    "src_lang": "en",
+    "tgt_lang": "de",
+    "data_dir": "./data",
     "vocab_size": 5000,
     "max_length": 128,
-    "data_multiplier": 10
+    "apply_cleaning": true
   },
   "description": "Tiny Transformer with only 2 layers"
 }

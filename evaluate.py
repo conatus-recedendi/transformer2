@@ -12,10 +12,11 @@ from datetime import datetime
 import matplotlib.pyplot as plt
 
 from src.model import Transformer
-from src.data_utils import create_tokenizer, create_token_based_data_loader, prepare_sample_data, load_tokenizer
+from src.data_utils import create_tokenizer, create_token_based_data_loader, load_tokenizer
 from src.trainer import LabelSmoothingLoss
 from src.metrics import EvaluationMetrics, batch_decode_for_evaluation
 from src.bpe_adapter import load_bpe_tokenizers, create_bpe_token_based_data_loader
+from src.data_loader import load_problem_data, clean_sentence_pairs
 
 class ModelEvaluator:
     def __init__(self, checkpoint_path, device='auto'):
@@ -115,40 +116,57 @@ class ModelEvaluator:
         )
     
     def prepare_data(self, data_type='validation'):
-        """평가용 데이터 준비 (BPE 토크나이저 지원)"""
+        """평가용 데이터 준비 (실제 데이터 파일 사용, BPE 토크나이저 지원)"""
         print(f"Preparing {data_type} data with BPE tokenizers...")
         
-        src_texts, tgt_texts = prepare_sample_data()
+        # 실제 데이터 로드
+        train_data, val_data, test_data = load_problem_data(self.config)
+        
         data_config = self.config['data']
         
         if data_type == 'validation':
-            # 원본 데이터를 검증용으로 사용
-            eval_src = src_texts
-            eval_tgt = tgt_texts
+            eval_src, eval_tgt = val_data
+        elif data_type == 'test':
+            eval_src, eval_tgt = test_data
         elif data_type == 'train':
-            # 확장된 학습 데이터로 평가
-            eval_src = src_texts * data_config['data_multiplier']
-            eval_tgt = tgt_texts * data_config['data_multiplier']
+            eval_src, eval_tgt = train_data
         else:
-            raise ValueError(f"Unsupported data_type: {data_type}")
+            raise ValueError(f"Unsupported data_type: {data_type}. Use 'train', 'validation', or 'test'")
         
-        # BPE 기반 데이터로더 생성 시도
+        print(f"Loaded {data_type} data: {len(eval_src):,} pairs")
+        
+        # 데이터 클리닝 적용 (config 설정에 따라)
+        if data_config.get('apply_cleaning', True):
+            print("Applying data cleaning...")
+            eval_src, eval_tgt = clean_sentence_pairs(eval_src, eval_tgt)
+            print(f"After cleaning: {len(eval_src):,} pairs")
+        
+        # 빈 데이터 확인
+        if not eval_src or not eval_tgt:
+            print("⚠️  No evaluation data found! Creating sample data for testing...")
+            from src.data_loader import create_data_sample_for_testing
+            
+            # 샘플 데이터 생성
+            create_data_sample_for_testing()
+            
+            # 다시 로드
+            train_data, val_data, test_data = load_problem_data(self.config)
+            if data_type == 'validation':
+                eval_src, eval_tgt = val_data
+            elif data_type == 'test':
+                eval_src, eval_tgt = test_data
+            else:
+                eval_src, eval_tgt = train_data
+        
+        # BPE 기반 데이터로더 생성
         batch_tokens = self.config['training']['batch_tokens']
         max_length = data_config['max_length']
         
-        # BPE 토크나이저인지 확인
-        if hasattr(self.src_tokenizer, 'bpe_vocab'):
-            # BPE 토크나이저 사용
-            self.eval_loader = create_bpe_token_based_data_loader(
-                eval_src, eval_tgt, self.src_tokenizer, self.tgt_tokenizer,
-                batch_tokens=batch_tokens, max_length=max_length, shuffle=False
-            )
-        else:
-            # 레거시 토크나이저 사용
-            self.eval_loader = create_token_based_data_loader(
-                eval_src, eval_tgt, self.src_tokenizer, self.tgt_tokenizer,
-                batch_tokens=batch_tokens, max_length=max_length, shuffle=False
-            )
+        # BPE 토크나이저 사용 (항상 BPE 사용)
+        self.eval_loader = create_bpe_token_based_data_loader(
+            eval_src, eval_tgt, self.src_tokenizer, self.tgt_tokenizer,
+            batch_tokens=batch_tokens, max_length=max_length, shuffle=False
+        )
         
         print(f"Data prepared: {data_type} set with {len(eval_src)} samples")
         
