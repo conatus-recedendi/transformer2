@@ -20,7 +20,7 @@
     "save_every": 1000
   },
   "data": {
-    "problem": "sample_en_de",
+    "problem": "wmt14_en_de",
     "src_lang": "en",
     "tgt_lang": "de",
     "data_dir": "./data",
