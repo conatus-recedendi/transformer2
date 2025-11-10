@@ -164,6 +164,10 @@ class Transformer(nn.Module):
         self.output_projection = nn.Linear(d_model, tgt_vocab_size)
         
         self.dropout = nn.Dropout(0.1)
+
+
+        self.tgt_embedding.weight = self.output_projection.weight
+        self.output_projection.weight = self.tgt_embedding.weight
         
     def create_padding_mask(self, seq, pad_idx=0):
         """패딩 토큰에 대한 마스크 생성"""
