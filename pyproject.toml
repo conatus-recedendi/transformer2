@@ -5,7 +5,7 @@ description = "Attention is All You Need"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "datasets>=3.3.2",
+    "datasets=3.3.2",
     "ipykernel>=7.1.0",
     "jupyter>=1.1.1",
     "matplotlib>=3.10.7",
