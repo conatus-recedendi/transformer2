@@ -1,0 +1,26 @@
+{
+  "model": {
+    "N": 6,
+    "d_model": 1024,
+    "d_ff": 4096,
+    "h": 16,
+    "d_k": 64,
+    "d_v": 64,
+    "P_drop": 0.3,
+    "max_seq_length": 256
+  },
+  "training": {
+    "epochs": 30,
+    "batch_size": 16,
+    "learning_rate": 5e-5,
+    "warmup_steps": 8000,
+    "label_smoothing": 0.1,
+    "grad_clip": 0.5
+  },
+  "data": {
+    "vocab_size": 8000,
+    "max_length": 256,
+    "data_multiplier": 5
+  },
+  "description": "Big model with high dropout"
+}

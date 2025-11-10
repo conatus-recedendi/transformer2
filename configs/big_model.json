@@ -1,0 +1,26 @@
+{
+  "model": {
+    "N": 6,
+    "d_model": 1024,
+    "d_ff": 4096,
+    "h": 16,
+    "d_k": 64,
+    "d_v": 64,
+    "P_drop": 0.3,
+    "max_seq_length": 128
+  },
+  "training": {
+    "epochs": 100,
+    "batch_tokens": 25000,
+    "learning_rate": 1e-4,
+    "warmup_steps": 4000,
+    "label_smoothing": 0.1,
+    "grad_clip": 1.0
+  },
+  "data": {
+    "vocab_size": 5000,
+    "max_length": 128,
+    "data_multiplier": 10
+  },
+  "description": "Big Transformer model with large dimensions and high dropout"
+}
