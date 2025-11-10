@@ -171,7 +171,7 @@ class Transformer(nn.Module):
     
     def create_look_ahead_mask(self, size):
         """미래 토큰을 가리는 마스크 생성"""
-        mask = torch.tril(torch.ones(size, size))
+        mask = torch.tril(torch.ones(size, size, dtype=torch.bool))
         return mask.unsqueeze(0).unsqueeze(0)
     
     def forward(self, src, tgt, src_pad_idx=0, tgt_pad_idx=0):
