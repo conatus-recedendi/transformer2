@@ -123,7 +123,6 @@ def main():
     # 평가 모드
     if args.evaluate:
         from evaluate import ModelEvaluator
-        from datetime import datetime
         
         print("Transformer 모델 평가 모드")
         print("=" * 60)
