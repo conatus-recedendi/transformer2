@@ -13,9 +13,11 @@ dependencies = [
     "pandas>=2.3.3",
     "seaborn>=0.13.2",
     "tokenizers>=0.22.1",
-    "torch==2.5.1",
-    "torchaudio==2.5.1",
-    "torchvision==0.20.1",
     "tqdm>=4.67.1",
-    "pyarrow==19.0.0"
+    "pyarrow==19.0.0",
+    "torch==2.2.2+cu121; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "torchvision==0.17.2+cu121; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "torchaudio==2.2.2+cu121; sys_platform == 'linux' and platform_machine == 'x86_64'",
 ]
+[tool.uv.index]
+url = "https://download.pytorch.org/whl/cu121"
