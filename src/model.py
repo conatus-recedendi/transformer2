@@ -5,6 +5,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
+from torch.utils.checkpoint import checkpoint
 
 class MultiHeadAttention(nn.Module):
     def __init__(self, d_model, n_heads):
@@ -166,10 +167,15 @@ class Transformer(nn.Module):
         self.output_projection = nn.Linear(d_model, tgt_vocab_size)
         
         self.dropout = nn.Dropout(0.1)
-
+        self.gradient_checkpointing = False  # Gradient checkpointing 플래그
 
         self.tgt_embedding.weight = self.output_projection.weight
         self.output_projection.weight = self.tgt_embedding.weight
+        
+    def gradient_checkpointing_enable(self):
+        """Gradient checkpointing 활성화"""
+        self.gradient_checkpointing = True
+        print("✓ Gradient checkpointing enabled - trading compute for memory")
         
     def create_padding_mask(self, seq, pad_idx=0):
         """패딩 토큰에 대한 마스크 생성"""
@@ -200,15 +206,21 @@ class Transformer(nn.Module):
         src_embedded = self.dropout(src_embedded)
         tgt_embedded = self.dropout(tgt_embedded)
         
-        # Encoder
+        # Encoder with optional gradient checkpointing
         encoder_output = src_embedded
         for encoder_layer in self.encoder_layers:
-            encoder_output = encoder_layer(encoder_output, src_mask)
+            if self.gradient_checkpointing and self.training:
+                encoder_output = checkpoint(encoder_layer, encoder_output, src_mask)
+            else:
+                encoder_output = encoder_layer(encoder_output, src_mask)
         
-        # Decoder
+        # Decoder with optional gradient checkpointing
         decoder_output = tgt_embedded
         for decoder_layer in self.decoder_layers:
-            decoder_output = decoder_layer(decoder_output, encoder_output, src_mask, tgt_mask)
+            if self.gradient_checkpointing and self.training:
+                decoder_output = checkpoint(decoder_layer, decoder_output, encoder_output, src_mask, tgt_mask)
+            else:
+                decoder_output = decoder_layer(decoder_output, encoder_output, src_mask, tgt_mask)
         
         # Output projection
         output = self.output_projection(decoder_output)
