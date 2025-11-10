@@ -11,7 +11,7 @@
   },
   "training": {
     "epochs": 30,
-    "batch_size": 16,
+    "batch_tokens": 25000,
     "learning_rate": 5e-5,
     "warmup_steps": 8000,
     "label_smoothing": 0.1,

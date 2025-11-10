@@ -45,8 +45,8 @@ def merge_config_with_args(config, args):
     """커맨드라인 인자로 config 덮어쓰기"""
     if args.epochs is not None:
         config['training']['epochs'] = args.epochs
-    if args.batch_size is not None:
-        config['training']['batch_size'] = args.batch_size
+    if args.batch_tokens is not None:
+        config['training']['batch_tokens'] = args.batch_tokens
     if args.learning_rate is not None:
         config['training']['learning_rate'] = args.learning_rate
     if args.max_length is not None:
@@ -111,7 +111,6 @@ class TransformerTrainer:
         data_multiplier = data_config['data_multiplier']
         vocab_size = data_config['vocab_size']
         max_length = data_config['max_length']
-        batch_size = self.config['training']['batch_size']
         
         # 데이터 확장
         train_src = src_texts * data_multiplier
@@ -383,7 +382,7 @@ def main():
     parser.add_argument('--config_path', type=str, default=None,
                        help='Config 파일의 전체 경로')
     parser.add_argument('--epochs', type=int, default=None, help='학습 에포크 수 (config 파일 덮어쓰기)')
-    parser.add_argument('--batch_size', type=int, default=None, help='배치 크기 (config 파일 덮어쓰기)')
+    parser.add_argument('--batch_tokens', type=int, default=None, help='배치 토큰 수 (config 파일 덮어쓰기)')
     parser.add_argument('--learning_rate', type=float, default=None, help='학습률 (config 파일 덮어쓰기)')
     parser.add_argument('--max_length', type=int, default=None, help='최대 시퀀스 길이 (config 파일 덮어쓰기)')
     parser.add_argument('--vocab_size', type=int, default=None, help='어휘 크기 (config 파일 덮어쓰기)')
@@ -419,7 +418,7 @@ def main():
             print(f"{'':15s}  Model: N={model_cfg['N']}, d_model={model_cfg['d_model']}, "
                   f"d_ff={model_cfg['d_ff']}, h={model_cfg['h']}")
             print(f"{'':15s}  Training: epochs={training_cfg['epochs']}, "
-                  f"batch_size={training_cfg['batch_size']}, lr={training_cfg['learning_rate']}")
+                  f"batch_tokens={training_cfg['batch_tokens']}, lr={training_cfg['learning_rate']}")
             print(f"{'':15s}  Data: vocab_size={data_cfg['vocab_size']}, "
                   f"max_length={data_cfg['max_length']}")
             print()
@@ -462,7 +461,7 @@ def main():
     print("=" * 80)
     print(f"Config: {config_name} - {config.get('description', 'No description')}")
     print(f"에포크: {config['training']['epochs']}")
-    print(f"배치 크기: {config['training']['batch_size']}")
+    print(f"배치 토큰 수: {config['training']['batch_tokens']}")
     print(f"학습률: {config['training']['learning_rate']}")
     print(f"모델 차원: {config['model']['d_model']}, 레이어: {config['model']['N']}")
     print(f"저장 디렉토리: {args.save_dir}")
@@ -503,7 +502,7 @@ def create_sample_config(config_name):
         },
         "training": {
             "epochs": 20,
-            "batch_size": 32,
+            "batch_tokens": 25000,
             "learning_rate": 1e-4,
             "warmup_steps": 4000,
             "label_smoothing": 0.1,
