@@ -12,6 +12,7 @@ import json
 
 from .model import Transformer
 from .data_utils import create_tokenizer, create_token_based_data_loader, prepare_sample_data, save_tokenizer
+from .bpe_adapter import create_bpe_tokenizers, create_bpe_token_based_data_loader, save_bpe_tokenizers
 
 
 class LabelSmoothingLoss(nn.Module):
@@ -56,14 +57,13 @@ class TransformerTrainer:
         print(f"Model config: {config.get('description', 'Custom config')}")
         
     def prepare_data(self):
-        """데이터 준비"""
-        print("Preparing data...")
+        """데이터 준비 (BPE 토크나이저 사용)"""
+        print("Preparing data with BPE tokenizers...")
         src_texts, tgt_texts = prepare_sample_data()
         
         # config에서 데이터 설정 가져오기
         data_config = self.config['data']
         data_multiplier = data_config['data_multiplier']
-        vocab_size = data_config['vocab_size']
         max_length = data_config['max_length']
         
         # 데이터 확장
@@ -72,25 +72,22 @@ class TransformerTrainer:
         val_src = src_texts
         val_tgt = tgt_texts
         
-        # 토크나이저 생성
-        print("Creating tokenizers...")
-        self.src_tokenizer = create_tokenizer(train_src, vocab_size=vocab_size)
-        self.tgt_tokenizer = create_tokenizer(train_tgt, vocab_size=vocab_size)
+        # BPE 토크나이저 생성/로드
+        print("Creating/Loading BPE tokenizers...")
+        self.src_tokenizer, self.tgt_tokenizer = create_bpe_tokenizers(self.config)
         
-        # 토크나이저 저장
-        os.makedirs("tokenizers", exist_ok=True)
-        save_tokenizer(self.src_tokenizer, "tokenizers/src_tokenizer.json")
-        save_tokenizer(self.tgt_tokenizer, "tokenizers/tgt_tokenizer.json")
+        # 토크나이저 저장 (이미 .model 파일로 저장됨)
+        save_bpe_tokenizers(self.src_tokenizer, self.tgt_tokenizer)
         
-        # 토큰 기반 데이터 로더 생성
+        # BPE 기반 토큰 데이터 로더 생성
         batch_tokens = self.config['training']['batch_tokens']
-        print(f"Creating token-based data loaders with {batch_tokens} tokens per batch...")
+        print(f"Creating BPE token-based data loaders with {batch_tokens} tokens per batch...")
         
-        self.train_loader = create_token_based_data_loader(
+        self.train_loader = create_bpe_token_based_data_loader(
             train_src, train_tgt, self.src_tokenizer, self.tgt_tokenizer,
             batch_tokens=batch_tokens, max_length=max_length, shuffle=True
         )
-        self.val_loader = create_token_based_data_loader(
+        self.val_loader = create_bpe_token_based_data_loader(
             val_src, val_tgt, self.src_tokenizer, self.tgt_tokenizer,
             batch_tokens=batch_tokens, max_length=max_length, shuffle=False
         )

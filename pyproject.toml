@@ -16,6 +16,7 @@ dependencies = [
     "tqdm>=4.67.1",
     "pyarrow==19.0.0",
     "sacrebleu>=2.4.3",
+    "sentencepiece>=0.1.99",
     "torch==2.5.1; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "torchvision==0.20.1; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "torchaudio==2.5.1; sys_platform == 'linux' and platform_machine == 'x86_64'",

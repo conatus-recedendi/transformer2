@@ -15,6 +15,7 @@ from src.model import Transformer
 from src.data_utils import create_tokenizer, create_token_based_data_loader, prepare_sample_data, load_tokenizer
 from src.trainer import LabelSmoothingLoss
 from src.metrics import EvaluationMetrics, batch_decode_for_evaluation
+from src.bpe_adapter import load_bpe_tokenizers, create_bpe_token_based_data_loader
 
 class ModelEvaluator:
     def __init__(self, checkpoint_path, device='auto'):
@@ -48,28 +49,29 @@ class ModelEvaluator:
         return checkpoint
     
     def load_tokenizers(self):
-        """토크나이저 로드"""
-        print("Loading tokenizers...")
+        """BPE 토크나이저 로드"""
+        print("Loading BPE tokenizers...")
         
-        src_tokenizer_path = "tokenizers/src_tokenizer.json"
-        tgt_tokenizer_path = "tokenizers/tgt_tokenizer.json"
+        src_model_path = "tokenizers/src_bpe.model"
+        tgt_model_path = "tokenizers/tgt_bpe.model"
         
-        if os.path.exists(src_tokenizer_path) and os.path.exists(tgt_tokenizer_path):
-            self.src_tokenizer = load_tokenizer(src_tokenizer_path)
-            self.tgt_tokenizer = load_tokenizer(tgt_tokenizer_path)
-            print(f"Loaded tokenizers from saved files")
+        if os.path.exists(src_model_path) and os.path.exists(tgt_model_path):
+            self.src_tokenizer, self.tgt_tokenizer = load_bpe_tokenizers()
+            print(f"Loaded BPE tokenizers from saved model files")
         else:
-            print("Saved tokenizers not found. Creating new ones...")
-            # 데이터에서 토크나이저 재생성
-            src_texts, tgt_texts = prepare_sample_data()
-            data_config = self.config['data']
+            print("Saved BPE tokenizers not found. Trying legacy tokenizers...")
+            # 레거시 토크나이저 시도
+            src_tokenizer_path = "tokenizers/src_tokenizer.json"
+            tgt_tokenizer_path = "tokenizers/tgt_tokenizer.json"
             
-            # 학습 시와 동일한 데이터로 토크나이저 생성
-            train_src = src_texts * data_config['data_multiplier']
-            train_tgt = tgt_texts * data_config['data_multiplier']
-            
-            self.src_tokenizer = create_tokenizer(train_src, vocab_size=data_config['vocab_size'])
-            self.tgt_tokenizer = create_tokenizer(train_tgt, vocab_size=data_config['vocab_size'])
+            if os.path.exists(src_tokenizer_path) and os.path.exists(tgt_tokenizer_path):
+                self.src_tokenizer = load_tokenizer(src_tokenizer_path)
+                self.tgt_tokenizer = load_tokenizer(tgt_tokenizer_path)
+                print(f"Loaded legacy tokenizers from JSON files")
+            else:
+                print("No tokenizers found. Creating new BPE tokenizers...")
+                from src.bpe_adapter import create_bpe_tokenizers
+                self.src_tokenizer, self.tgt_tokenizer = create_bpe_tokenizers(self.config)
         
         print(f"Source vocabulary size: {self.src_tokenizer.get_vocab_size()}")
         print(f"Target vocabulary size: {self.tgt_tokenizer.get_vocab_size()}")
@@ -113,8 +115,8 @@ class ModelEvaluator:
         )
     
     def prepare_data(self, data_type='validation'):
-        """평가용 데이터 준비"""
-        print(f"Preparing {data_type} data...")
+        """평가용 데이터 준비 (BPE 토크나이저 지원)"""
+        print(f"Preparing {data_type} data with BPE tokenizers...")
         
         src_texts, tgt_texts = prepare_sample_data()
         data_config = self.config['data']
@@ -130,14 +132,23 @@ class ModelEvaluator:
         else:
             raise ValueError(f"Unsupported data_type: {data_type}")
         
-        # 토큰 기반 데이터로더 생성
+        # BPE 기반 데이터로더 생성 시도
         batch_tokens = self.config['training']['batch_tokens']
         max_length = data_config['max_length']
         
-        self.eval_loader = create_token_based_data_loader(
-            eval_src, eval_tgt, self.src_tokenizer, self.tgt_tokenizer,
-            batch_tokens=batch_tokens, max_length=max_length, shuffle=False
-        )
+        # BPE 토크나이저인지 확인
+        if hasattr(self.src_tokenizer, 'bpe_vocab'):
+            # BPE 토크나이저 사용
+            self.eval_loader = create_bpe_token_based_data_loader(
+                eval_src, eval_tgt, self.src_tokenizer, self.tgt_tokenizer,
+                batch_tokens=batch_tokens, max_length=max_length, shuffle=False
+            )
+        else:
+            # 레거시 토크나이저 사용
+            self.eval_loader = create_token_based_data_loader(
+                eval_src, eval_tgt, self.src_tokenizer, self.tgt_tokenizer,
+                batch_tokens=batch_tokens, max_length=max_length, shuffle=False
+            )
         
         print(f"Data prepared: {data_type} set with {len(eval_src)} samples")
         

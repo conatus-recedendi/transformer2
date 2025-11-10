@@ -140,15 +140,22 @@ class EvaluationMetrics:
 
 
 def decode_tokens_to_text(tokens: torch.Tensor, tokenizer, pad_token_id: int = 0) -> str:
-    """토큰을 텍스트로 디코딩"""
+    """토큰을 텍스트로 디코딩 (BPE 및 레거시 토크나이저 지원)"""
     # 패딩 제거
-    tokens = tokens[tokens != pad_token_id]
+    tokens = tokens[tokens != pad_token_id] 
     tokens_list = tokens.cpu().numpy().tolist()
     
     try:
         text = tokenizer.decode(tokens_list)
-        # 특수 토큰 제거
-        text = text.replace('[BOS]', '').replace('[EOS]', '').replace('[PAD]', '')
+        
+        # BPE 토크나이저와 레거시 토크나이저 모두 지원
+        if hasattr(tokenizer, 'bpe_vocab'):
+            # BPE 토크나이저: <PAD>, <BOS>, <EOS>, <UNK> 제거
+            text = text.replace('<PAD>', '').replace('<BOS>', '').replace('<EOS>', '').replace('<UNK>', '')
+        else:
+            # 레거시 토크나이저: [PAD], [BOS], [EOS] 제거
+            text = text.replace('[BOS]', '').replace('[EOS]', '').replace('[PAD]', '')
+        
         text = text.strip()
         return text
     except Exception as e:
