@@ -43,8 +43,8 @@ def get_available_configs():
 
 def merge_config_with_args(config, args):
     """커맨드라인 인자로 config 덮어쓰기"""
-    if args.epochs is not None:
-        config['training']['epochs'] = args.epochs
+    if args.train_steps is not None:
+        config['training']['train_steps'] = args.train_steps
     if args.batch_tokens is not None:
         config['training']['batch_tokens'] = args.batch_tokens
     if args.learning_rate is not None:
@@ -255,14 +255,17 @@ class TransformerTrainer:
         
         return total_loss / num_batches
     
-    def evaluate_epoch(self):
-        """한 에포크 평가"""
+    def evaluate(self, max_batches=20):
+        """평가 (제한된 배치 수로)"""
         self.model.eval()
         total_loss = 0
         num_batches = 0
         
         with torch.no_grad():
-            for batch in self.val_loader:
+            for batch_idx, batch in enumerate(self.val_loader):
+                if batch_idx >= max_batches:
+                    break
+                    
                 src = batch['src'].to(self.device)
                 tgt_input = batch['tgt_input'].to(self.device)
                 tgt_output = batch['tgt_output'].to(self.device)
@@ -273,71 +276,123 @@ class TransformerTrainer:
                 total_loss += loss.item()
                 num_batches += 1
         
-        return total_loss / num_batches
+        return total_loss / num_batches if num_batches > 0 else 0
     
-    def train(self, num_epochs=None, save_dir="checkpoints"):
-        """전체 학습 프로세스"""
-        if num_epochs is None:
-            num_epochs = self.config['training']['epochs']
-        """전체 학습 프로세스"""
+    def train(self, train_steps=None, save_dir="checkpoints"):
+        """전체 학습 프로세스 (스텝 기반)"""
+        if train_steps is None:
+            train_steps = self.config['training']['train_steps']
+        
         os.makedirs(save_dir, exist_ok=True)
+        
+        training_config = self.config['training']
+        eval_every = training_config.get('eval_every', 500)
+        save_every = training_config.get('save_every', 1000)
         
         train_losses = []
         val_losses = []
+        steps = []
         best_val_loss = float('inf')
         
-        print(f"\nStarting training for {num_epochs} epochs...")
+        print(f"\nStarting training for {train_steps} steps...")
+        print(f"Evaluation every {eval_every} steps")
+        print(f"Checkpoint save every {save_every} steps")
         print("=" * 60)
         
         start_time = time.time()
+        self.model.train()
         
-        for epoch in range(num_epochs):
-            print(f"\nEpoch {epoch+1}/{num_epochs}")
-            print("-" * 40)
+        # 무한 데이터 로더 생성 (train_steps만큼 반복)
+        def infinite_dataloader(dataloader):
+            while True:
+                for batch in dataloader:
+                    yield batch
+        
+        data_iter = infinite_dataloader(self.train_loader)
+        running_loss = 0
+        log_every = 50  # 50스텝마다 로그 출력
+        
+        for step in range(1, train_steps + 1):
+            batch = next(data_iter)
+            src = batch['src'].to(self.device)
+            tgt_input = batch['tgt_input'].to(self.device)
+            tgt_output = batch['tgt_output'].to(self.device)
             
-            # 학습
-            train_loss = self.train_epoch()
-            train_losses.append(train_loss)
+            self.optimizer.zero_grad()
+            
+            output = self.model(src, tgt_input, src_pad_idx=0, tgt_pad_idx=0)
+            loss = self.criterion(output, tgt_output)
+            
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), training_config['grad_clip'])
+            self.optimizer.step()
+            self.scheduler.step()
+            
+            running_loss += loss.item()
+            
+            # 주기적 로그 출력
+            if step % log_every == 0:
+                avg_loss = running_loss / log_every
+                current_tokens = (src != 0).sum().item() + (tgt_input != 0).sum().item()
+                batch_size = src.size(0)
+                
+                print(f"Step {step:5d}/{train_steps} | "
+                      f"Loss: {avg_loss:.4f} | "
+                      f"LR: {self.scheduler.get_last_lr()[0]:.2e} | "
+                      f"Batch: {batch_size} sents, {current_tokens} tokens")
+                
+                train_losses.append(avg_loss)
+                steps.append(step)
+                running_loss = 0
             
             # 평가
-            val_loss = self.evaluate_epoch()
-            val_losses.append(val_loss)
+            if step % eval_every == 0:
+                print(f"\n--- Evaluation at step {step} ---")
+                val_loss = self.evaluate()
+                val_losses.append(val_loss)
+                
+                print(f"Val Loss: {val_loss:.4f}")
+                
+                # 최고 성능 모델 저장
+                if val_loss < best_val_loss:
+                    best_val_loss = val_loss
+                    torch.save({
+                        'step': step,
+                        'model_state_dict': self.model.state_dict(),
+                        'optimizer_state_dict': self.optimizer.state_dict(),
+                        'scheduler_state_dict': self.scheduler.state_dict(),
+                        'val_loss': val_loss,
+                        'config': self.config
+                    }, os.path.join(save_dir, 'best_model.pth'))
+                    print(f"✓ Best model saved with val loss: {val_loss:.4f}")
+                
+                self.model.train()  # 평가 후 다시 학습 모드로
+                print("-" * 40)
             
-            print(f"Train Loss: {train_loss:.4f}")
-            print(f"Val Loss: {val_loss:.4f}")
-            print(f"Learning Rate: {self.scheduler.get_last_lr()[0]:.2e}")
-            
-            # 최고 성능 모델 저장
-            if val_loss < best_val_loss:
-                best_val_loss = val_loss
+            # 체크포인트 저장
+            if step % save_every == 0:
                 torch.save({
-                    'epoch': epoch,
+                    'step': step,
                     'model_state_dict': self.model.state_dict(),
                     'optimizer_state_dict': self.optimizer.state_dict(),
-                    'val_loss': val_loss,
+                    'scheduler_state_dict': self.scheduler.state_dict(),
                     'config': self.config
-                }, os.path.join(save_dir, 'best_model.pth'))
-                print(f"✓ Best model saved with val loss: {val_loss:.4f}")
-            
-            # 주기적으로 체크포인트 저장
-            if (epoch + 1) % 5 == 0:
-                torch.save({
-                    'epoch': epoch,
-                    'model_state_dict': self.model.state_dict(),
-                    'optimizer_state_dict': self.optimizer.state_dict(),
-                    'val_loss': val_loss,
-                    'config': self.config
-                }, os.path.join(save_dir, f'checkpoint_epoch_{epoch+1}.pth'))
+                }, os.path.join(save_dir, f'checkpoint_step_{step}.pth'))
+                print(f"Checkpoint saved at step {step}")
         
         total_time = time.time() - start_time
         print(f"\nTraining completed in {total_time/3600:.2f} hours")
+        print(f"Total steps: {train_steps}")
+        print(f"Best validation loss: {best_val_loss:.4f}")
         
         # 학습 곡선 저장
-        self.save_training_curves(train_losses, val_losses, save_dir)
+        self.save_training_curves_steps(steps, train_losses, val_losses, save_dir)
         
         # 학습 결과 저장
         results = {
             'config': self.config,
+            'train_steps': train_steps,
+            'steps': steps,
             'train_losses': train_losses,
             'val_losses': val_losses,
             'best_val_loss': best_val_loss,
@@ -348,28 +403,48 @@ class TransformerTrainer:
         with open(os.path.join(save_dir, 'training_results.json'), 'w') as f:
             json.dump(results, f, indent=2)
         
-        return train_losses, val_losses
+        return steps, train_losses, val_losses
     
-    def save_training_curves(self, train_losses, val_losses, save_dir):
-        """학습 곡선 저장"""
-        plt.figure(figsize=(12, 5))
+    def save_training_curves_steps(self, steps, train_losses, val_losses, save_dir):
+        """스텝 기반 학습 곡선 저장"""
+        plt.figure(figsize=(15, 5))
         
-        plt.subplot(1, 2, 1)
-        plt.plot(train_losses, label='Train Loss', color='blue')
-        plt.plot(val_losses, label='Validation Loss', color='red')
-        plt.xlabel('Epoch')
+        plt.subplot(1, 3, 1)
+        plt.plot(steps, train_losses, label='Train Loss', color='blue', linewidth=1)
+        plt.xlabel('Steps')
         plt.ylabel('Loss')
-        plt.title('Training and Validation Loss')
+        plt.title('Training Loss')
         plt.legend()
         plt.grid(True, alpha=0.3)
         
-        plt.subplot(1, 2, 2)
-        plt.plot(val_losses, label='Validation Loss', color='red', marker='o')
-        plt.xlabel('Epoch')
-        plt.ylabel('Validation Loss')
-        plt.title('Validation Loss')
-        plt.legend()
-        plt.grid(True, alpha=0.3)
+        # 검증 손실은 eval_every 간격으로만 있으므로 별도 처리
+        if val_losses:
+            eval_every = self.config['training'].get('eval_every', 500)
+            val_steps = list(range(eval_every, len(val_losses) * eval_every + 1, eval_every))
+            
+            plt.subplot(1, 3, 2)
+            plt.plot(val_steps, val_losses, label='Validation Loss', color='red', marker='o', linewidth=2)
+            plt.xlabel('Steps')
+            plt.ylabel('Loss')
+            plt.title('Validation Loss')
+            plt.legend()
+            plt.grid(True, alpha=0.3)
+            
+            plt.subplot(1, 3, 3)
+            # 같은 구간의 train loss와 val loss 비교
+            train_at_eval = []
+            for val_step in val_steps:
+                # 가장 가까운 train step의 loss 찾기
+                closest_idx = min(range(len(steps)), key=lambda i: abs(steps[i] - val_step))
+                train_at_eval.append(train_losses[closest_idx])
+            
+            plt.plot(val_steps, train_at_eval, label='Train Loss', color='blue', linewidth=2)
+            plt.plot(val_steps, val_losses, label='Validation Loss', color='red', linewidth=2)
+            plt.xlabel('Steps')
+            plt.ylabel('Loss')
+            plt.title('Train vs Validation Loss')
+            plt.legend()
+            plt.grid(True, alpha=0.3)
         
         plt.tight_layout()
         plt.savefig(os.path.join(save_dir, 'training_curves.png'), dpi=300)
@@ -381,7 +456,7 @@ def main():
                        help='Config 파일 이름 (configs/ 디렉토리의 .json 파일)')
     parser.add_argument('--config_path', type=str, default=None,
                        help='Config 파일의 전체 경로')
-    parser.add_argument('--epochs', type=int, default=None, help='학습 에포크 수 (config 파일 덮어쓰기)')
+    parser.add_argument('--train_steps', type=int, default=None, help='학습 스텝 수 (config 파일 덮어쓰기)')
     parser.add_argument('--batch_tokens', type=int, default=None, help='배치 토큰 수 (config 파일 덮어쓰기)')
     parser.add_argument('--learning_rate', type=float, default=None, help='학습률 (config 파일 덮어쓰기)')
     parser.add_argument('--max_length', type=int, default=None, help='최대 시퀀스 길이 (config 파일 덮어쓰기)')
@@ -417,7 +492,7 @@ def main():
             data_cfg = config['data']
             print(f"{'':15s}  Model: N={model_cfg['N']}, d_model={model_cfg['d_model']}, "
                   f"d_ff={model_cfg['d_ff']}, h={model_cfg['h']}")
-            print(f"{'':15s}  Training: epochs={training_cfg['epochs']}, "
+            print(f"{'':15s}  Training: train_steps={training_cfg['train_steps']}, "
                   f"batch_tokens={training_cfg['batch_tokens']}, lr={training_cfg['learning_rate']}")
             print(f"{'':15s}  Data: vocab_size={data_cfg['vocab_size']}, "
                   f"max_length={data_cfg['max_length']}")
@@ -460,7 +535,7 @@ def main():
     print("Transformer 번역 모델 학습 시작")
     print("=" * 80)
     print(f"Config: {config_name} - {config.get('description', 'No description')}")
-    print(f"에포크: {config['training']['epochs']}")
+    print(f"학습 스텝: {config['training']['train_steps']}")
     print(f"배치 토큰 수: {config['training']['batch_tokens']}")
     print(f"학습률: {config['training']['learning_rate']}")
     print(f"모델 차원: {config['model']['d_model']}, 레이어: {config['model']['N']}")
@@ -480,8 +555,8 @@ def main():
     trainer.setup_training()
     
     # 학습 시작
-    train_losses, val_losses = trainer.train(
-        num_epochs=config['training']['epochs'],
+    steps, train_losses, val_losses = trainer.train(
+        train_steps=config['training']['train_steps'],
         save_dir=args.save_dir
     )
     
@@ -501,12 +576,14 @@ def create_sample_config(config_name):
             "max_seq_length": 128
         },
         "training": {
-            "epochs": 20,
+            "train_steps": 10000,
             "batch_tokens": 25000,
             "learning_rate": 1e-4,
             "warmup_steps": 4000,
             "label_smoothing": 0.1,
-            "grad_clip": 1.0
+            "grad_clip": 1.0,
+            "eval_every": 500,
+            "save_every": 1000
         },
         "data": {
             "vocab_size": 5000,
