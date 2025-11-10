@@ -181,7 +181,7 @@ class BPETokenBatchSampler:
 
 def create_bpe_tokenizers(config: Dict, force_retrain: bool = False) -> Tuple[BPETokenizerAdapter, BPETokenizerAdapter]:
     """BPE 토크나이저 생성 또는 로드"""
-    vocab_size = config['data']['vocab_size']
+    requested_vocab_size = config['data']['vocab_size']
     
     # 모델 파일 경로
     src_model_path = "tokenizers/src_bpe.model"
@@ -189,15 +189,25 @@ def create_bpe_tokenizers(config: Dict, force_retrain: bool = False) -> Tuple[BP
     
     os.makedirs("tokenizers", exist_ok=True)
     
+    # 데이터 크기 기반 vocab_size 조정
+    src_texts, tgt_texts = prepare_sample_data()
+    total_data_size = len(src_texts) * config['data']['data_multiplier']
+    
+    # 작은 데이터셋에 대한 안전한 vocab_size 계산
+    safe_vocab_size = min(requested_vocab_size, max(1000, total_data_size // 3))
+    
+    if safe_vocab_size < requested_vocab_size:
+        logger.warning(f"Adjusting vocab_size from {requested_vocab_size} to {safe_vocab_size} for small dataset")
+        # config 업데이트
+        config['data']['vocab_size'] = safe_vocab_size
+    
     # 소스 토크나이저 처리
     src_vocab = BPEVocabulary()
     if os.path.exists(src_model_path) and not force_retrain:
         logger.info(f"Loading existing source BPE model: {src_model_path}")
         src_vocab.load_model(src_model_path)
     else:
-        logger.info(f"Training new source BPE model...")
-        # 샘플 데이터로 훈련 (실제 사용 시에는 대용량 데이터 사용)
-        src_texts, _ = prepare_sample_data()
+        logger.info(f"Training new source BPE model with vocab_size={safe_vocab_size}...")
         
         # 임시 파일로 저장하여 BPE 훈련
         temp_src_file = "temp_src.txt"
@@ -205,7 +215,15 @@ def create_bpe_tokenizers(config: Dict, force_retrain: bool = False) -> Tuple[BP
             for text in src_texts * config['data']['data_multiplier']:
                 f.write(text + '\n')
         
-        src_vocab.train_bpe_model([temp_src_file], vocab_size=vocab_size, model_prefix="tokenizers/src_bpe")
+        try:
+            src_vocab.train_bpe_model([temp_src_file], vocab_size=safe_vocab_size, model_prefix="tokenizers/src_bpe")
+        except Exception as e:
+            logger.error(f"Failed to train source BPE model: {e}")
+            # 더 작은 vocab_size로 재시도
+            fallback_vocab_size = max(500, safe_vocab_size // 2)
+            logger.info(f"Retrying with smaller vocab_size: {fallback_vocab_size}")
+            src_vocab.train_bpe_model([temp_src_file], vocab_size=fallback_vocab_size, model_prefix="tokenizers/src_bpe")
+            config['data']['vocab_size'] = fallback_vocab_size
         
         # 임시 파일 삭제
         if os.path.exists(temp_src_file):
@@ -217,9 +235,7 @@ def create_bpe_tokenizers(config: Dict, force_retrain: bool = False) -> Tuple[BP
         logger.info(f"Loading existing target BPE model: {tgt_model_path}")
         tgt_vocab.load_model(tgt_model_path)
     else:
-        logger.info(f"Training new target BPE model...")
-        # 샘플 데이터로 훈련
-        _, tgt_texts = prepare_sample_data()
+        logger.info(f"Training new target BPE model with vocab_size={config['data']['vocab_size']}...")
         
         # 임시 파일로 저장하여 BPE 훈련
         temp_tgt_file = "temp_tgt.txt"
@@ -227,7 +243,15 @@ def create_bpe_tokenizers(config: Dict, force_retrain: bool = False) -> Tuple[BP
             for text in tgt_texts * config['data']['data_multiplier']:
                 f.write(text + '\n')
         
-        tgt_vocab.train_bpe_model([temp_tgt_file], vocab_size=vocab_size, model_prefix="tokenizers/tgt_bpe")
+        try:
+            tgt_vocab.train_bpe_model([temp_tgt_file], vocab_size=config['data']['vocab_size'], model_prefix="tokenizers/tgt_bpe")
+        except Exception as e:
+            logger.error(f"Failed to train target BPE model: {e}")
+            # 더 작은 vocab_size로 재시도
+            fallback_vocab_size = max(500, config['data']['vocab_size'] // 2)
+            logger.info(f"Retrying with smaller vocab_size: {fallback_vocab_size}")
+            tgt_vocab.train_bpe_model([temp_tgt_file], vocab_size=fallback_vocab_size, model_prefix="tokenizers/tgt_bpe")
+            config['data']['vocab_size'] = fallback_vocab_size
         
         # 임시 파일 삭제
         if os.path.exists(temp_tgt_file):
@@ -240,6 +264,7 @@ def create_bpe_tokenizers(config: Dict, force_retrain: bool = False) -> Tuple[BP
     logger.info(f"BPE tokenizers ready:")
     logger.info(f"  Source vocab size: {src_tokenizer.get_vocab_size()}")
     logger.info(f"  Target vocab size: {tgt_tokenizer.get_vocab_size()}")
+    logger.info(f"  Final config vocab_size: {config['data']['vocab_size']}")
     
     return src_tokenizer, tgt_tokenizer
 
