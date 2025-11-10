@@ -76,8 +76,14 @@ EVALUATION RESULTS
 ============================================================
 Average Loss: 4.2345          # 평균 손실 (낮을수록 좋음)
 Perplexity: 68.42             # 퍼플렉서티 (낮을수록 좋음)
+BLEU Score: 12.34             # BLEU 점수 (높을수록 좋음)
+  - BLEU-1: 25.67             # 1-gram BLEU
+  - BLEU-2: 18.45             # 2-gram BLEU
+  - BLEU-3: 14.23             # 3-gram BLEU
+  - BLEU-4: 12.34             # 4-gram BLEU
 Total Batches: 45             # 평가된 배치 수
 Total Tokens: 125,000         # 평가된 총 토큰 수
+Total Samples: 450            # 평가된 총 샘플 수
 Loss Std: 0.234               # 손실의 표준편차
 Loss Range: [3.8912, 4.7823] # 손실 범위
 ============================================================
@@ -86,13 +92,14 @@ Loss Range: [3.8912, 4.7823] # 손실 범위
 Source: Hello, how are you?
 Target: 안녕하세요, 어떻게 지내세요?
 Prediction: 안녕하세요, 어떻게 지내고 있나요?
-Token Accuracy: 0.7500
+Sample BLEU: 23.45            # 개별 샘플 BLEU 점수
+Token Accuracy: 0.7500        # 토큰 레벨 정확도
 ```
 
 ### 생성되는 파일들
 
-- `evaluation_results.json`: 상세한 평가 메트릭
-- `loss_analysis.png`: 배치별 손실 분포 그래프
+- `evaluation_results.json`: 상세한 평가 메트릭 (Loss, Perplexity, BLEU 점수들)
+- `evaluation_analysis.png`: 손실 분포, 배치별 손실, 메트릭 요약 그래프
 
 ## 4. 고급 사용법
 

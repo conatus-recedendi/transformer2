@@ -14,6 +14,7 @@ import matplotlib.pyplot as plt
 from src.model import Transformer
 from src.data_utils import create_tokenizer, create_token_based_data_loader, prepare_sample_data, load_tokenizer
 from src.trainer import LabelSmoothingLoss
+from src.metrics import EvaluationMetrics, batch_decode_for_evaluation
 
 class ModelEvaluator:
     def __init__(self, checkpoint_path, device='auto'):
@@ -152,14 +153,11 @@ class ModelEvaluator:
         print(f"  - Target batch tokens: {batch_tokens}")
     
     def evaluate_full(self, max_batches=None):
-        """전체 데이터에 대한 상세 평가"""
-        print("\nStarting full evaluation...")
+        """전체 데이터에 대한 상세 평가 (BLEU Score와 Perplexity 포함)"""
+        print("\nStarting full evaluation with BLEU and Perplexity metrics...")
         
         self.model.eval()
-        total_loss = 0
-        total_tokens = 0
-        num_batches = 0
-        batch_losses = []
+        metrics = EvaluationMetrics()
         
         with torch.no_grad():
             progress_bar = tqdm(self.eval_loader, desc="Evaluating")
@@ -172,62 +170,52 @@ class ModelEvaluator:
                 tgt_input = batch['tgt_input'].to(self.device)
                 tgt_output = batch['tgt_output'].to(self.device)
                 
+                # 모델 예측
                 output = self.model(src, tgt_input, src_pad_idx=0, tgt_pad_idx=0)
                 loss = self.criterion(output, tgt_output)
+                predictions = torch.argmax(output, dim=-1)
                 
-                # 토큰 수 계산 (패딩 제외)
+                # 손실 업데이트
                 batch_tokens = (tgt_output != 0).sum().item()
+                metrics.update_loss(loss.item(), batch_tokens)
                 
-                total_loss += loss.item()
-                total_tokens += batch_tokens
-                num_batches += 1
-                batch_losses.append(loss.item())
+                # 텍스트로 디코딩하여 BLEU 스코어 계산
+                src_texts, tgt_texts, pred_texts = batch_decode_for_evaluation(
+                    src, tgt_output, predictions,
+                    self.src_tokenizer, self.tgt_tokenizer, pad_token_id=0
+                )
                 
-                progress_bar.set_postfix({
-                    'loss': f'{loss.item():.4f}',
-                    'avg_loss': f'{total_loss/num_batches:.4f}',
-                    'tokens': batch_tokens
-                })
+                # 빈 텍스트 필터링
+                valid_pairs = [(pred, tgt) for pred, tgt in zip(pred_texts, tgt_texts) 
+                              if pred.strip() and tgt.strip()]
+                
+                if valid_pairs:
+                    valid_preds, valid_tgts = zip(*valid_pairs)
+                    metrics.add_predictions(list(valid_preds), list(valid_tgts))
+                
+                # 진행률 업데이트
+                current_summary = metrics.get_summary()
+                if current_summary:
+                    progress_bar.set_postfix({
+                        'loss': f'{loss.item():.4f}',
+                        'avg_loss': f'{current_summary["average_loss"]:.4f}',
+                        'ppl': f'{current_summary["perplexity"]:.1f}',
+                        'samples': len(metrics.predictions)
+                    })
         
-        avg_loss = total_loss / num_batches if num_batches > 0 else 0
-        perplexity = torch.exp(torch.tensor(avg_loss)).item()
-        
-        # 통계 계산
-        batch_losses = np.array(batch_losses)
-        loss_std = np.std(batch_losses)
-        loss_min = np.min(batch_losses)
-        loss_max = np.max(batch_losses)
-        
-        results = {
-            'average_loss': avg_loss,
-            'perplexity': perplexity,
-            'total_batches': num_batches,
-            'total_tokens': total_tokens,
-            'loss_std': loss_std,
-            'loss_min': loss_min,
-            'loss_max': loss_max,
-            'batch_losses': batch_losses.tolist()
-        }
-        
-        print("\n" + "="*60)
-        print("EVALUATION RESULTS")
-        print("="*60)
-        print(f"Average Loss: {avg_loss:.4f}")
-        print(f"Perplexity: {perplexity:.2f}")
-        print(f"Total Batches: {num_batches}")
-        print(f"Total Tokens: {total_tokens:,}")
-        print(f"Loss Std: {loss_std:.4f}")
-        print(f"Loss Range: [{loss_min:.4f}, {loss_max:.4f}]")
-        print("="*60)
+        # 최종 결과 계산 및 출력
+        results = metrics.get_summary()
+        metrics.print_summary()
         
         return results
     
     def evaluate_samples(self, num_samples=5):
-        """몇 개 샘플에 대한 상세 분석"""
+        """몇 개 샘플에 대한 상세 분석 (개별 BLEU 스코어 포함)"""
         print(f"\nEvaluating {num_samples} sample translations...")
         
         self.model.eval()
         samples_evaluated = 0
+        sample_metrics = EvaluationMetrics()
         
         with torch.no_grad():
             for batch in self.eval_loader:
@@ -238,27 +226,25 @@ class ModelEvaluator:
                 output = self.model(src, tgt_input, src_pad_idx=0, tgt_pad_idx=0)
                 predictions = torch.argmax(output, dim=-1)
                 
+                # 배치 전체를 디코딩
+                src_texts, tgt_texts, pred_texts = batch_decode_for_evaluation(
+                    src, tgt_output, predictions,
+                    self.src_tokenizer, self.tgt_tokenizer, pad_token_id=0
+                )
+                
                 batch_size = src.size(0)
                 for i in range(min(batch_size, num_samples - samples_evaluated)):
                     print(f"\n--- Sample {samples_evaluated + 1} ---")
+                    print(f"Source: {src_texts[i]}")
+                    print(f"Target: {tgt_texts[i]}")
+                    print(f"Prediction: {pred_texts[i]}")
                     
-                    # 소스 문장
-                    src_tokens = src[i].cpu().numpy()
-                    src_tokens = src_tokens[src_tokens != 0]  # 패딩 제거
-                    src_text = self.src_tokenizer.decode(src_tokens.tolist())
-                    print(f"Source: {src_text}")
-                    
-                    # 실제 타겟
-                    tgt_tokens = tgt_output[i].cpu().numpy()
-                    tgt_tokens = tgt_tokens[tgt_tokens != 0]  # 패딩 제거
-                    tgt_text = self.tgt_tokenizer.decode(tgt_tokens.tolist())
-                    print(f"Target: {tgt_text}")
-                    
-                    # 예측
-                    pred_tokens = predictions[i].cpu().numpy()
-                    pred_tokens = pred_tokens[pred_tokens != 0]  # 패딩 제거
-                    pred_text = self.tgt_tokenizer.decode(pred_tokens.tolist())
-                    print(f"Prediction: {pred_text}")
+                    # 개별 샘플 BLEU 스코어
+                    if pred_texts[i].strip() and tgt_texts[i].strip():
+                        from sacrebleu import BLEU
+                        bleu_scorer = BLEU()
+                        sample_bleu = bleu_scorer.sentence_score(pred_texts[i], [tgt_texts[i]])
+                        print(f"Sample BLEU: {sample_bleu.score:.2f}")
                     
                     # 토큰 레벨 정확도
                     tgt_seq = tgt_output[i]
@@ -268,12 +254,26 @@ class ModelEvaluator:
                         accuracy = (tgt_seq[mask] == pred_seq[mask]).float().mean().item()
                         print(f"Token Accuracy: {accuracy:.4f}")
                     
+                    # 전체 메트릭에 추가
+                    if pred_texts[i].strip() and tgt_texts[i].strip():
+                        sample_metrics.add_predictions([pred_texts[i]], [tgt_texts[i]])
+                    
                     samples_evaluated += 1
                 
                 if samples_evaluated >= num_samples:
                     break
         
         print(f"\nSample evaluation completed ({samples_evaluated} samples)")
+        
+        # 샘플들의 전체 BLEU 스코어
+        if len(sample_metrics.predictions) > 0:
+            sample_bleu_scores = sample_metrics.compute_bleu()
+            print(f"\nOverall Sample BLEU Scores:")
+            print(f"BLEU: {sample_bleu_scores['bleu']:.2f}")
+            print(f"BLEU-1: {sample_bleu_scores['bleu_1']:.2f}")
+            print(f"BLEU-2: {sample_bleu_scores['bleu_2']:.2f}")
+            print(f"BLEU-3: {sample_bleu_scores['bleu_3']:.2f}")
+            print(f"BLEU-4: {sample_bleu_scores['bleu_4']:.2f}")
     
     def save_results(self, results, output_dir):
         """평가 결과 저장"""
@@ -295,11 +295,13 @@ class ModelEvaluator:
             batch_losses = save_results['results'].pop('batch_losses', [])
             json.dump(save_results, f, indent=2, ensure_ascii=False)
         
-        # 배치별 손실 그래프 저장
+        # 평가 결과 시각화
+        batch_losses = results.get('batch_losses', [])
         if batch_losses:
-            plt.figure(figsize=(12, 4))
+            plt.figure(figsize=(15, 5))
             
-            plt.subplot(1, 2, 1)
+            # 배치별 손실
+            plt.subplot(1, 3, 1)
             plt.plot(batch_losses, alpha=0.7)
             plt.axhline(y=results['average_loss'], color='r', linestyle='--', 
                        label=f'Average: {results["average_loss"]:.4f}')
@@ -309,7 +311,8 @@ class ModelEvaluator:
             plt.legend()
             plt.grid(True, alpha=0.3)
             
-            plt.subplot(1, 2, 2)
+            # 손실 분포
+            plt.subplot(1, 3, 2)
             plt.hist(batch_losses, bins=30, alpha=0.7, edgecolor='black')
             plt.axvline(x=results['average_loss'], color='r', linestyle='--', 
                        label=f'Average: {results["average_loss"]:.4f}')
@@ -319,8 +322,36 @@ class ModelEvaluator:
             plt.legend()
             plt.grid(True, alpha=0.3)
             
+            # 메트릭 요약
+            plt.subplot(1, 3, 3)
+            metrics_names = ['Perplexity', 'BLEU', 'BLEU-1', 'BLEU-2', 'BLEU-3', 'BLEU-4']
+            metrics_values = [
+                results.get('perplexity', 0),
+                results.get('bleu', 0),
+                results.get('bleu_1', 0),
+                results.get('bleu_2', 0),
+                results.get('bleu_3', 0),
+                results.get('bleu_4', 0)
+            ]
+            
+            # Perplexity는 스케일이 다르므로 정규화
+            normalized_values = metrics_values.copy()
+            if normalized_values[0] > 0:  # Perplexity
+                normalized_values[0] = min(normalized_values[0] / 10, 100)  # 스케일 조정
+            
+            bars = plt.bar(metrics_names, normalized_values, alpha=0.7)
+            plt.title('Evaluation Metrics')
+            plt.ylabel('Score')
+            plt.xticks(rotation=45)
+            
+            # 값 표시
+            for bar, value in zip(bars, metrics_values):
+                height = bar.get_height()
+                plt.text(bar.get_x() + bar.get_width()/2., height + 0.5,
+                        f'{value:.2f}', ha='center', va='bottom', fontsize=8)
+            
             plt.tight_layout()
-            plt.savefig(os.path.join(output_dir, 'loss_analysis.png'), dpi=300)
+            plt.savefig(os.path.join(output_dir, 'evaluation_analysis.png'), dpi=300)
             plt.close()
         
         print(f"Results saved to: {output_dir}")
