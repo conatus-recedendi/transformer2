@@ -31,8 +31,8 @@ class MultiHeadAttention(nn.Module):
         
         # 마스크 적용 (패딩이나 미래 토큰 가리기)
         if mask is not None:
-            # FP32 사용으로 -1e9 값 사용 가능
-            mask_value = -1e9
+            # 데이터 타입에 관계없이 안전한 값 사용
+            mask_value = torch.finfo(scores.dtype).min
             scores = scores.masked_fill(mask == 0, mask_value)
         
         # Softmax 적용
