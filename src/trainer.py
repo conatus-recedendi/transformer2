@@ -79,7 +79,7 @@ class TransformerTrainer:
                 backoff_factor=0.8, # 더 보수적인 감소율  
                 growth_interval=2000  # 더 천천히 스케일 증가
             )
-            self.use_amp = True
+            self.use_amp = False
             # 스케일링 디버깅을 위한 변수들
             self.scale_overflow_count = 0
             self.last_scale_check_step = 0
