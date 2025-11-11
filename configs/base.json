@@ -10,10 +10,10 @@
     "max_seq_length": 128
   },
   "training": {
-    "train_steps": 200000,
-    "batch_tokens": 12500,
+    "train_steps": 40000,
+    "batch_tokens": 6250,
     "learning_rate": 1e-4,
-    "warmup_steps": 8000,
+    "warmup_steps": 16000,
     "label_smoothing": 0.1,
     "grad_clip": 1.0,
     "eval_every": 1000,
