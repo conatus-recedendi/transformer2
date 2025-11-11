@@ -450,17 +450,17 @@ class TransformerTrainer:
                     continue
                 
                 # 🔍 메모리 사용량 디버깅
-                if step % 100 == 1:  # 100스텝마다 메모리 체크
-                    torch.cuda.empty_cache()  # 캐시 정리
-                    print(f"🔍 Memory Debug at Step {step}:")
-                    print(f"   Before backward: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
+                # if step % 100 == 1:  # 100스텝마다 메모리 체크
+                #     torch.cuda.empty_cache()  # 캐시 정리
+                #     print(f"🔍 Memory Debug at Step {step}:")
+                #     print(f"   Before backward: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
                 
                 loss.backward()
                 
-                if step % 100 == 1:
-                    print(f"   After backward: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
-                    print(f"   Reserved memory: {torch.cuda.memory_reserved() / 1024**3:.2f} GB")
-                    print(f"   Max allocated: {torch.cuda.max_memory_allocated() / 1024**3:.2f} GB")
+                # if step % 100 == 1:
+                #     print(f"   After backward: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
+                #     print(f"   Reserved memory: {torch.cuda.memory_reserved() / 1024**3:.2f} GB")
+                #     print(f"   Max allocated: {torch.cuda.max_memory_allocated() / 1024**3:.2f} GB")
                 
                 grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), training_config['grad_clip'])
                 
