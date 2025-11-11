@@ -65,9 +65,13 @@ class TransformerLRScheduler:
         - 더 큰 배치 (batch_tokens > 25K): 더 빠른 warmup
         - 더 작은 배치 (batch_tokens < 25K): 더 느린 warmup
         """
+        # 0 step 방지
+        if self.step_num == 0:
+            return 1e-8  # 매우 작은 값으로 시작
+        
         # 배치 크기에 따른 effective step 계산
-        effective_step = self.step_num * self.batch_ratio
-        effective_warmup = self.warmup_steps * self.batch_ratio
+        effective_step = max(1, self.step_num * self.batch_ratio)
+        effective_warmup = max(1, self.warmup_steps * self.batch_ratio)
         
         # Transformer 논문의 스케줄링 공식
         d_model_factor = self.d_model ** (-0.5)
@@ -77,6 +81,11 @@ class TransformerLRScheduler:
         )
         
         lr = d_model_factor * step_factor
+        
+        # LR 범위 제한 (안전장치)
+        max_lr = 0.01  # 최대 LR 제한
+        min_lr = 1e-8  # 최소 LR 제한
+        lr = max(min_lr, min(lr, max_lr))
         
         return lr
     

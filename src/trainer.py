@@ -38,6 +38,8 @@ class LabelSmoothingLoss(nn.Module):
             return torch.tensor(0.0, device=pred.device, requires_grad=True)
         
         # 메모리 효율적인 구현: true_dist 행렬을 생성하지 않음
+        # Numerical stability를 위한 클리핑
+        pred = torch.clamp(pred, min=-100, max=100)
         log_pred = torch.log_softmax(pred, dim=1)
         
         # 정답 레이블에 대한 손실 (confidence 부분)
@@ -49,7 +51,16 @@ class LabelSmoothingLoss(nn.Module):
         # 가중 평균으로 최종 손실 계산
         loss = self.confidence * nll_loss + self.smoothing * smooth_loss
         
-        return loss.mean()
+        # NaN/Inf 체크
+        final_loss = loss.mean()
+        
+        # 안전장치: 비정상적인 loss 값 처리
+        if torch.isnan(final_loss) or torch.isinf(final_loss):
+            # fallback으로 단순한 cross entropy 반환
+            ce_loss = torch.nn.functional.cross_entropy(pred, target, ignore_index=self.ignore_index)
+            return ce_loss if not (torch.isnan(ce_loss) or torch.isinf(ce_loss)) else torch.tensor(0.0, device=pred.device, requires_grad=True)
+        
+        return final_loss
 
 
 class TransformerTrainer:
@@ -60,8 +71,18 @@ class TransformerTrainer:
         self.optimizer = None
         self.criterion = None
         self.scheduler = None
-        self.scaler = GradScaler() if self.device.type == 'cuda' else None  # Mixed precision용
-        self.use_amp = self.device.type == 'cuda'  # CUDA일 때만 AMP 사용
+        # Mixed precision 설정 (더 안전한 설정)
+        if self.device.type == 'cuda':
+            self.scaler = GradScaler(
+                init_scale=2**10,  # 초기 스케일을 낮게 설정 (기본값: 2**16)
+                growth_factor=2.0,
+                backoff_factor=0.5,
+                growth_interval=1000  # 더 천천히 스케일 증가
+            )
+            self.use_amp = True
+        else:
+            self.scaler = None
+            self.use_amp = False
         
         print(f"Trainer initialized with device: {self.device}")
         print(f"Mixed Precision (AMP): {'Enabled' if self.use_amp else 'Disabled'}")
@@ -303,16 +324,33 @@ class TransformerTrainer:
             
             self.optimizer.zero_grad()
             
-            # Mixed Precision Training
+            # Mixed Precision Training with NaN detection
             if self.use_amp:
                 with autocast():
                     output = self.model(src, tgt_input, src_pad_idx=0, tgt_pad_idx=0)
                     loss = self.criterion(output, tgt_output)
                 
+                # NaN 체크
+                if torch.isnan(loss) or torch.isinf(loss):
+                    print(f"⚠️  NaN/Inf loss detected at step {step}!")
+                    print(f"   Loss value: {loss.item()}")
+                    print(f"   Output stats: min={output.min():.4f}, max={output.max():.4f}")
+                    print(f"   Skipping this batch...")
+                    continue
+                
                 # Scaled backward pass
                 self.scaler.scale(loss).backward()
+                
+                # Gradient clipping (scaler unscale 후)
                 self.scaler.unscale_(self.optimizer)
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), training_config['grad_clip'])
+                grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), training_config['grad_clip'])
+                
+                # Gradient 체크
+                if torch.isnan(grad_norm) or torch.isinf(grad_norm):
+                    print(f"⚠️  NaN/Inf gradient detected at step {step}! Grad norm: {grad_norm}")
+                    self.scaler.update()  # scaler만 업데이트하고 step 건너뛰기
+                    continue
+                
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
             else:
@@ -320,8 +358,20 @@ class TransformerTrainer:
                 output = self.model(src, tgt_input, src_pad_idx=0, tgt_pad_idx=0)
                 loss = self.criterion(output, tgt_output)
                 
+                # NaN 체크
+                if torch.isnan(loss) or torch.isinf(loss):
+                    print(f"⚠️  NaN/Inf loss detected at step {step}!")
+                    print(f"   Loss value: {loss.item()}")
+                    print(f"   Skipping this batch...")
+                    continue
+                
                 loss.backward()
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), training_config['grad_clip'])
+                grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), training_config['grad_clip'])
+                
+                if torch.isnan(grad_norm) or torch.isinf(grad_norm):
+                    print(f"⚠️  NaN/Inf gradient detected at step {step}!")
+                    continue
+                
                 self.optimizer.step()
             
             self.scheduler.step()
