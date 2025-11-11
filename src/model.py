@@ -26,11 +26,6 @@ class MultiHeadAttention(nn.Module):
     def scaled_dot_product_attention(self, Q, K, V, mask=None):
         batch_size, n_heads, seq_len, d_k = Q.size()
         
-        # 🚀 메모리 절약: 긴 시퀀스에서 청크 기반 어텐션 사용
-        if seq_len > 512 and self.training:
-            return self._memory_efficient_attention(Q, K, V, mask)
-        
-        # 일반 어텐션 (짧은 시퀀스용)
         # Q, K의 내적을 계산하고 d_k의 제곱근으로 나눔
         scores = torch.matmul(Q, K.transpose(-2, -1)) / math.sqrt(d_k)
         
@@ -48,54 +43,6 @@ class MultiHeadAttention(nn.Module):
         output = torch.matmul(attention_weights, V)
         
         return output, attention_weights
-    
-    def _memory_efficient_attention(self, Q, K, V, mask=None, chunk_size=256):
-        """🚀 메모리 효율적인 청크 기반 어텐션
-        
-        핵심 아이디어:
-        1. 전체 attention matrix (seq_len x seq_len)를 한번에 만들지 않음
-        2. Query를 청크로 나누어 순차적으로 처리
-        3. 메모리 사용량: O(seq_len²) → O(chunk_size × seq_len)
-        """
-        batch_size, n_heads, seq_len, d_k = Q.size()
-        scale = 1.0 / math.sqrt(d_k)
-        
-        # 출력 텐서 미리 할당
-        output = torch.zeros_like(Q)
-        
-        # Query를 청크 단위로 처리
-        for i in range(0, seq_len, chunk_size):
-            end_i = min(i + chunk_size, seq_len)
-            Q_chunk = Q[:, :, i:end_i, :]  # [batch, n_heads, chunk_size, d_k]
-            
-            # 현재 청크에 대해서만 attention scores 계산
-            # 메모리: [batch, n_heads, chunk_size, seq_len] (전체보다 훨씬 작음)
-            scores_chunk = torch.matmul(Q_chunk, K.transpose(-2, -1)) * scale
-            
-            # 마스크 적용 (해당 청크 부분만)
-            if mask is not None:
-                mask_chunk = mask[:, :, i:end_i, :]
-                mask_value = -1e4 if scores_chunk.dtype == torch.float16 else -1e9
-                scores_chunk = scores_chunk.masked_fill(mask_chunk == 0, mask_value)
-            
-            # Softmax (청크별로 독립적으로 계산)
-            attn_weights_chunk = F.softmax(scores_chunk, dim=-1)
-            
-            # Dropout 적용
-            if self.training:
-                attn_weights_chunk = self.dropout(attn_weights_chunk)
-            
-            # Value와 곱셈: [batch, n_heads, chunk_size, d_k]
-            output_chunk = torch.matmul(attn_weights_chunk, V)
-            
-            # 결과를 전체 출력에 저장
-            output[:, :, i:end_i, :] = output_chunk
-            
-            # 🗑️ 중간 텐서 정리 (메모리 절약)
-            del scores_chunk, attn_weights_chunk, output_chunk
-        
-        # attention_weights는 메모리 절약을 위해 None 반환
-        return output, None
     
     def forward(self, query, key, value, mask=None):
         batch_size = query.size(0)

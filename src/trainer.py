@@ -225,12 +225,25 @@ class TransformerTrainer:
         
         training_config = self.config['training']
         
-        # 옵티마이저
+        # 🚀 메모리 효율적인 옵티마이저 설정
+        print("🔧 Optimizer Memory Analysis:")
+        model_params = sum(p.numel() for p in self.model.parameters())
+        model_memory_mb = model_params * 2 / (1024**2)  # FP16
+        adam_state_memory_mb = model_params * 2 * 4 / (1024**2)  # 2 states × FP32
+        
+        print(f"   Model parameters: {model_params:,}")
+        print(f"   Model memory (FP16): {model_memory_mb:.1f} MB")
+        print(f"   Adam state memory: {adam_state_memory_mb:.1f} MB")
+        print(f"   Total optimizer overhead: {adam_state_memory_mb:.1f} MB")
+        
+        # 옵티마이저 (메모리 효율적인 설정)
         self.optimizer = optim.Adam(
             self.model.parameters(),
             lr=training_config['learning_rate'],
             betas=(0.9, 0.98),
-            eps=1e-9
+            eps=1e-9,
+            # 메모리 절약을 위한 설정들
+            foreach=False,  # 메모리 효율적인 업데이트
         )
         
         # 손실 함수
@@ -318,11 +331,12 @@ class TransformerTrainer:
         
         for step in range(1, train_steps + 1):
             batch = next(data_iter)
-            src = batch['src'].to(self.device)
-            tgt_input = batch['tgt_input'].to(self.device)
-            tgt_output = batch['tgt_output'].to(self.device)
+            src = batch['src'].to(self.device, non_blocking=True)
+            tgt_input = batch['tgt_input'].to(self.device, non_blocking=True)
+            tgt_output = batch['tgt_output'].to(self.device, non_blocking=True)
             
-            self.optimizer.zero_grad()
+            # 🚀 메모리 효율적인 gradient 초기화
+            self.optimizer.zero_grad(set_to_none=True)  # 메모리 절약
             
             # Mixed Precision Training with NaN detection
             if self.use_amp:
@@ -365,7 +379,19 @@ class TransformerTrainer:
                     print(f"   Skipping this batch...")
                     continue
                 
+                # 🔍 메모리 사용량 디버깅
+                if step % 100 == 1:  # 100스텝마다 메모리 체크
+                    torch.cuda.empty_cache()  # 캐시 정리
+                    print(f"🔍 Memory Debug at Step {step}:")
+                    print(f"   Before backward: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
+                
                 loss.backward()
+                
+                if step % 100 == 1:
+                    print(f"   After backward: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
+                    print(f"   Reserved memory: {torch.cuda.memory_reserved() / 1024**3:.2f} GB")
+                    print(f"   Max allocated: {torch.cuda.max_memory_allocated() / 1024**3:.2f} GB")
+                
                 grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), training_config['grad_clip'])
                 
                 if torch.isnan(grad_norm) or torch.isinf(grad_norm):
@@ -430,6 +456,11 @@ class TransformerTrainer:
                     'config': self.config
                 }, os.path.join(save_dir, f'checkpoint_step_{step}.pth'))
                 print(f"Checkpoint saved at step {step}")
+                
+                # 🧹 주기적인 메모리 정리
+                if self.device.type == 'cuda':
+                    torch.cuda.empty_cache()
+                    print(f"   GPU memory cleaned: {torch.cuda.memory_allocated() / 1024**3:.2f} GB allocated")
         
         total_time = time.time() - start_time
         print(f"\nTraining completed in {total_time/3600:.2f} hours")
