@@ -74,12 +74,15 @@ class TransformerTrainer:
         # Mixed precision 설정 (더 안전한 설정)
         if self.device.type == 'cuda':
             self.scaler = GradScaler(
-                init_scale=2**10,  # 초기 스케일을 낮게 설정 (기본값: 2**16)
-                growth_factor=2.0,
-                backoff_factor=0.5,
-                growth_interval=1000  # 더 천천히 스케일 증가
+                init_scale=2**8,   # 매우 낮은 초기 스케일 (256)
+                growth_factor=1.5, # 더 보수적인 증가율
+                backoff_factor=0.8, # 더 보수적인 감소율  
+                growth_interval=2000  # 더 천천히 스케일 증가
             )
             self.use_amp = True
+            # 스케일링 디버깅을 위한 변수들
+            self.scale_overflow_count = 0
+            self.last_scale_check_step = 0
         else:
             self.scaler = None
             self.use_amp = False
@@ -338,33 +341,100 @@ class TransformerTrainer:
             # 🚀 메모리 효율적인 gradient 초기화
             self.optimizer.zero_grad(set_to_none=True)  # 메모리 절약
             
-            # Mixed Precision Training with NaN detection
+            # Mixed Precision Training with 강화된 안전성 체크
             if self.use_amp:
                 with autocast():
                     output = self.model(src, tgt_input, src_pad_idx=0, tgt_pad_idx=0)
                     loss = self.criterion(output, tgt_output)
                 
-                # NaN 체크
+                # 🔍 Loss 안전성 체크
                 if torch.isnan(loss) or torch.isinf(loss):
                     print(f"⚠️  NaN/Inf loss detected at step {step}!")
                     print(f"   Loss value: {loss.item()}")
                     print(f"   Output stats: min={output.min():.4f}, max={output.max():.4f}")
+                    print(f"   Current scale: {self.scaler.get_scale()}")
                     print(f"   Skipping this batch...")
+                    self.scaler.update()  # 스케일 조정
                     continue
+                
+                # 🔍 스케일링 상태 모니터링 (주기적)
+                if step % 500 == 0:
+                    current_scale = self.scaler.get_scale()
+                    print(f"🔍 Scale Debug at Step {step}:")
+                    print(f"   Current scale: {current_scale}")
+                    print(f"   Scale overflows since last check: {self.scale_overflow_count}")
+                    self.scale_overflow_count = 0
+                    
+                    # 스케일이 너무 높으면 경고
+                    if current_scale > 2**15:  # 32768
+                        print(f"⚠️  Scale is getting high: {current_scale}")
+                        print(f"   Consider reducing growth_factor or growth_interval")
                 
                 # Scaled backward pass
                 self.scaler.scale(loss).backward()
                 
-                # Gradient clipping (scaler unscale 후)
-                self.scaler.unscale_(self.optimizer)
-                grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), training_config['grad_clip'])
+                # 🔍 Gradient 안전성 체크 (unscale 전에 스케일된 gradient 체크)
+                scaled_grad_norm_sq = 0
+                for p in self.model.parameters():
+                    if p.grad is not None:
+                        scaled_grad_norm_sq += (p.grad ** 2).sum().item()
+                scaled_grad_norm = scaled_grad_norm_sq ** 0.5
                 
-                # Gradient 체크
-                if torch.isnan(grad_norm) or torch.isinf(grad_norm):
-                    print(f"⚠️  NaN/Inf gradient detected at step {step}! Grad norm: {grad_norm}")
-                    self.scaler.update()  # scaler만 업데이트하고 step 건너뛰기
+                # 스케일된 gradient가 너무 크면 조기 감지
+                if scaled_grad_norm > 1e10:  # 매우 큰 값
+                    print(f"⚠️  Very large scaled gradient detected at step {step}!")
+                    print(f"   Scaled grad norm: {scaled_grad_norm:.2e}")
+                    print(f"   Current scale: {self.scaler.get_scale()}")
+                    print(f"   Skipping this batch...")
+                    self.scaler.update()  # 스케일 감소
+                    self.scale_overflow_count += 1
                     continue
                 
+                # Gradient unscaling 및 clipping
+                self.scaler.unscale_(self.optimizer)
+                
+                # 🔍 Optimizer state 안전성 체크 (주기적)
+                if step % 1000 == 0:
+                    has_inf_state = False
+                    inf_param_count = 0
+                    
+                    for group in self.optimizer.param_groups:
+                        for p in group['params']:
+                            if p.grad is None:
+                                continue
+                            state = self.optimizer.state[p]
+                            if len(state) > 0:  # Adam state 존재 확인
+                                # exp_avg, exp_avg_sq 체크
+                                if 'exp_avg' in state and (torch.isinf(state['exp_avg']).any() or torch.isnan(state['exp_avg']).any()):
+                                    has_inf_state = True
+                                    inf_param_count += 1
+                                if 'exp_avg_sq' in state and (torch.isinf(state['exp_avg_sq']).any() or torch.isnan(state['exp_avg_sq']).any()):
+                                    has_inf_state = True
+                                    inf_param_count += 1
+                    
+                    if has_inf_state:
+                        print(f"🚨 CRITICAL: Inf/NaN detected in optimizer state at step {step}!")
+                        print(f"   Parameters with inf/nan states: {inf_param_count}")
+                        print(f"   Current scale: {self.scaler.get_scale()}")
+                        print(f"   Resetting optimizer states...")
+                        
+                        # Optimizer state 리셋
+                        self.optimizer.state.clear()
+                        # 스케일도 크게 줄임
+                        self.scaler._scale.fill_(2**8)  # 256으로 리셋
+                        continue
+                
+                grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), training_config['grad_clip'])
+                
+                # Unscaled gradient 체크
+                if torch.isnan(grad_norm) or torch.isinf(grad_norm):
+                    print(f"⚠️  NaN/Inf unscaled gradient at step {step}! Grad norm: {grad_norm}")
+                    print(f"   Current scale: {self.scaler.get_scale()}")
+                    self.scaler.update()
+                    self.scale_overflow_count += 1
+                    continue
+                
+                # 정상적인 step
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
             else:
