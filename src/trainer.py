@@ -406,6 +406,35 @@ class TransformerTrainer:
         
         return steps, train_losses, val_losses
     
+    def load_checkpoint(self, checkpoint_path):
+        """체크포인트 로드"""
+        print(f"Loading checkpoint from: {checkpoint_path}")
+        
+        if not os.path.exists(checkpoint_path):
+            raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
+        
+        checkpoint = torch.load(checkpoint_path, map_location=self.device)
+        
+        # 모델 상태 로드
+        self.model.load_state_dict(checkpoint['model_state_dict'])
+        
+        # 옵티마이저 상태 로드
+        if self.optimizer and 'optimizer_state_dict' in checkpoint:
+            self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        
+        # 스케줄러 상태 로드
+        if self.scheduler and 'scheduler_state_dict' in checkpoint:
+            self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+        
+        step = checkpoint.get('step', 0)
+        val_loss = checkpoint.get('val_loss', float('inf'))
+        
+        print(f"✓ Checkpoint loaded:")
+        print(f"  - Step: {step}")
+        print(f"  - Validation loss: {val_loss:.4f}")
+        
+        return step, val_loss
+    
     def save_training_curves_steps(self, steps, train_losses, val_losses, save_dir):
         """스텝 기반 학습 곡선 저장"""
         plt.figure(figsize=(15, 5))

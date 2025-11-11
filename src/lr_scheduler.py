@@ -100,6 +100,32 @@ class TransformerLRScheduler:
             'is_warmup': is_warmup,
             'warmup_progress': min(effective_step / effective_warmup, 1.0) if effective_warmup > 0 else 1.0
         }
+    
+    def state_dict(self):
+        """스케줄러 상태 저장"""
+        return {
+            'step_num': self.step_num,
+            'd_model': self.d_model,
+            'warmup_steps': self.warmup_steps,
+            'batch_tokens': self.batch_tokens,
+            'base_batch_tokens': self.base_batch_tokens,
+            'batch_ratio': self.batch_ratio
+        }
+    
+    def load_state_dict(self, state_dict):
+        """스케줄러 상태 로드"""
+        self.step_num = state_dict['step_num']
+        self.d_model = state_dict['d_model']
+        self.warmup_steps = state_dict['warmup_steps']
+        self.batch_tokens = state_dict['batch_tokens']
+        self.base_batch_tokens = state_dict['base_batch_tokens']
+        self.batch_ratio = state_dict['batch_ratio']
+        
+        print(f"✓ Scheduler state loaded - step: {self.step_num}")
+    
+    def get_lr(self):
+        """현재 learning rate 반환 (PyTorch 호환성)"""
+        return [self._calculate_lr()]
 
 
 class AdaptiveLRScheduler:
@@ -168,4 +194,32 @@ class AdaptiveLRScheduler:
     
     def get_last_lr(self):
         """현재 learning rate 반환"""
+        return [self._calculate_lr()]
+    
+    def state_dict(self):
+        """스케줄러 상태 저장"""
+        return {
+            'step_num': self.step_num,
+            'd_model': self.d_model,
+            'warmup_steps': self.warmup_steps,
+            'batch_tokens': self.batch_tokens,
+            'min_lr': self.min_lr,
+            'max_lr_scale': self.max_lr_scale,
+            'batch_scale': self.batch_scale
+        }
+    
+    def load_state_dict(self, state_dict):
+        """스케줄러 상태 로드"""
+        self.step_num = state_dict['step_num']
+        self.d_model = state_dict['d_model']
+        self.warmup_steps = state_dict['warmup_steps']
+        self.batch_tokens = state_dict['batch_tokens']
+        self.min_lr = state_dict['min_lr']
+        self.max_lr_scale = state_dict['max_lr_scale']
+        self.batch_scale = state_dict['batch_scale']
+        
+        print(f"✓ Adaptive scheduler state loaded - step: {self.step_num}")
+    
+    def get_lr(self):
+        """현재 learning rate 반환 (PyTorch 호환성)"""
         return [self._calculate_lr()]
