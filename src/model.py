@@ -31,8 +31,8 @@ class MultiHeadAttention(nn.Module):
         
         # 마스크 적용 (패딩이나 미래 토큰 가리기)
         if mask is not None:
-            # FP16 호환을 위해 -1e4 사용 (원래 -1e9는 FP16 범위 초과)
-            mask_value = -1e4 if scores.dtype == torch.float16 else -1e9
+            # FP32 사용으로 -1e9 값 사용 가능
+            mask_value = -1e9
             scores = scores.masked_fill(mask == 0, mask_value)
         
         # Softmax 적용
