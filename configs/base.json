@@ -16,8 +16,9 @@
     "warmup_steps": 16000,
     "label_smoothing": 0.1,
     "grad_clip": 1.0,
-    "eval_every": 1000,
-    "save_every": 1000
+    "eval_every": 2500,
+    "save_every": 5000,
+    "max_checkpoints": 5
   },
   "data": {
     "problem": "wmt14_en_de",

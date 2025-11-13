@@ -71,6 +71,8 @@ class TransformerTrainer:
         self.optimizer = None
         self.criterion = None
         self.scheduler = None
+        # 체크포인트 관리를 위한 리스트
+        self.checkpoint_files = []
         # Mixed precision 설정 (더 안전한 설정)
         if self.device.type == 'cuda':
             self.scaler = GradScaler(
@@ -305,6 +307,9 @@ class TransformerTrainer:
         
         os.makedirs(save_dir, exist_ok=True)
         
+        # 기존 체크포인트 파일들 로드 및 정리
+        self.load_existing_checkpoints(save_dir)
+        
         training_config = self.config['training']
         eval_every = training_config.get('eval_every', 500)
         save_every = training_config.get('save_every', 1000)
@@ -518,14 +523,18 @@ class TransformerTrainer:
             
             # 체크포인트 저장
             if step % save_every == 0:
+                checkpoint_path = os.path.join(save_dir, f'checkpoint_step_{step}.pth')
                 torch.save({
                     'step': step,
                     'model_state_dict': self.model.state_dict(),
                     'optimizer_state_dict': self.optimizer.state_dict(),
                     'scheduler_state_dict': self.scheduler.state_dict(),
                     'config': self.config
-                }, os.path.join(save_dir, f'checkpoint_step_{step}.pth'))
+                }, checkpoint_path)
                 print(f"Checkpoint saved at step {step}")
+                
+                # 체크포인트 관리 (개수 제한)
+                self.manage_checkpoints(checkpoint_path, save_dir)
                 
                 # 🧹 주기적인 메모리 정리
                 if self.device.type == 'cuda':
@@ -556,6 +565,68 @@ class TransformerTrainer:
             json.dump(results, f, indent=2)
         
         return steps, train_losses, val_losses
+    
+    def manage_checkpoints(self, new_checkpoint_path, save_dir):
+        """체크포인트 관리: 최대 개수 제한 및 오래된 체크포인트 삭제"""
+        training_config = self.config['training']
+        max_checkpoints = training_config.get('max_checkpoints', 5)  # 기본값: 5개
+        
+        # 새 체크포인트를 리스트에 추가
+        self.checkpoint_files.append(new_checkpoint_path)
+        
+        # 최대 개수를 초과하면 가장 오래된 체크포인트 삭제
+        if len(self.checkpoint_files) > max_checkpoints:
+            # 삭제할 체크포인트 (가장 오래된 것)
+            old_checkpoint = self.checkpoint_files.pop(0)
+            
+            # 실제 파일 삭제
+            try:
+                if os.path.exists(old_checkpoint):
+                    os.remove(old_checkpoint)
+                    print(f"🗑️  Removed old checkpoint: {os.path.basename(old_checkpoint)}")
+            except Exception as e:
+                print(f"⚠️  Failed to remove old checkpoint {old_checkpoint}: {e}")
+        
+        # 현재 체크포인트 상태 출력
+        print(f"📁 Checkpoint status: {len(self.checkpoint_files)}/{max_checkpoints} files kept")
+    
+    def load_existing_checkpoints(self, save_dir):
+        """기존 체크포인트 파일들을 발견하여 리스트에 추가"""
+        import glob
+        
+        # checkpoint_step_*.pth 패턴의 파일들 찾기
+        checkpoint_pattern = os.path.join(save_dir, 'checkpoint_step_*.pth')
+        existing_checkpoints = glob.glob(checkpoint_pattern)
+        
+        # 스텝 번호로 정렬 (파일명에서 스텝 번호 추출)
+        def extract_step(filename):
+            import re
+            match = re.search(r'checkpoint_step_(\d+)\.pth', filename)
+            return int(match.group(1)) if match else 0
+        
+        existing_checkpoints.sort(key=extract_step)
+        
+        # 최대 개수만큼만 유지
+        training_config = self.config['training']
+        max_checkpoints = training_config.get('max_checkpoints', 5)
+        
+        if len(existing_checkpoints) > max_checkpoints:
+            # 오래된 체크포인트들 삭제
+            to_remove = existing_checkpoints[:-max_checkpoints]
+            for checkpoint_path in to_remove:
+                try:
+                    os.remove(checkpoint_path)
+                    print(f"🗑️  Removed old checkpoint: {os.path.basename(checkpoint_path)}")
+                except Exception as e:
+                    print(f"⚠️  Failed to remove old checkpoint {checkpoint_path}: {e}")
+            
+            # 남은 체크포인트들만 리스트에 추가
+            self.checkpoint_files = existing_checkpoints[-max_checkpoints:]
+        else:
+            self.checkpoint_files = existing_checkpoints
+        
+        if self.checkpoint_files:
+            print(f"📁 Found {len(self.checkpoint_files)} existing checkpoints")
     
     def load_checkpoint(self, checkpoint_path):
         """체크포인트 로드"""
