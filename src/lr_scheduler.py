@@ -70,16 +70,15 @@ class TransformerLRScheduler:
             return 1e-8  # 매우 작은 값으로 시작
         
         # 배치 크기에 따른 effective step 계산
-        effective_step = max(1, self.step_num * self.batch_ratio)
-        effective_warmup = max(1, self.warmup_steps * self.batch_ratio)
+        effective_step = max(1, self.step_num) / self.batch_ratio
+        effective_warmup = max(1, self.warmup_steps)
         
         # Transformer 논문의 스케줄링 공식
         d_model_factor = self.d_model ** (-0.5)
         step_factor = min(
             effective_step ** (-0.5),
             effective_step * (effective_warmup ** (-1.5))
-        ) * (1 / ((self.batch_tokens / self.base_batch_tokens) ** (-0.5)))
-        
+        )
         
         lr = d_model_factor * step_factor
         
