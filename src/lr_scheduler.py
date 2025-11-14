@@ -78,7 +78,8 @@ class TransformerLRScheduler:
         step_factor = min(
             effective_step ** (-0.5),
             effective_step * (effective_warmup ** (-1.5))
-        )
+        ) * (1 / ((self.batch_tokens / self.base_batch_tokens) ** (-0.5)))
+        
         
         lr = d_model_factor * step_factor
         
