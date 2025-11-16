@@ -17,7 +17,7 @@
     "label_smoothing": 0.1,
     "grad_clip": 1.0,
     "eval_every": 2500,
-    "save_every": 5000,
+    "save_every": 2000,
     "max_checkpoints": 5
   },
   "data": {
