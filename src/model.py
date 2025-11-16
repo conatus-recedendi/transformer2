@@ -150,6 +150,7 @@ class Transformer(nn.Module):
         # Embedding layers
         self.src_embedding = nn.Embedding(src_vocab_size, d_model)
         self.tgt_embedding = nn.Embedding(tgt_vocab_size, d_model)
+        self.tgt_embedding.weight = self.src_embedding.weight  # Weight tying
         
         # Positional encoding
         self.positional_encoding = PositionalEncoding(d_model, max_seq_length)
@@ -169,7 +170,7 @@ class Transformer(nn.Module):
         self.dropout = nn.Dropout(0.1)
         self.gradient_checkpointing = False  # Gradient checkpointing 플래그
 
-        self.tgt_embedding.weight = self.output_projection.weight
+        # self.tgt_embedding.weight = self.output_projection.weight
         self.output_projection.weight = self.tgt_embedding.weight
         
     def gradient_checkpointing_enable(self):
