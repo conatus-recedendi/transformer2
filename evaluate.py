@@ -10,6 +10,9 @@ from tqdm import tqdm
 import numpy as np
 from datetime import datetime
 import matplotlib.pyplot as plt
+import glob
+import re
+from collections import defaultdict
 
 from src.model import Transformer
 from src.data_utils import create_tokenizer, create_token_based_data_loader, load_tokenizer
@@ -18,8 +21,147 @@ from src.metrics import EvaluationMetrics, batch_decode_for_evaluation
 from src.bpe_adapter import load_bpe_tokenizers, create_bpe_token_based_data_loader, save_bpe_tokenizers
 from src.data_loader import load_problem_data, clean_sentence_pairs
 
+
+class BeamSearchDecoder:
+    """Beam Search Decoder for Transformer model"""
+    
+    def __init__(self, model, tgt_tokenizer, beam_size=4, alpha=0.6, max_length_offset=50):
+        self.model = model
+        self.tgt_tokenizer = tgt_tokenizer
+        self.beam_size = beam_size
+        self.alpha = alpha  # length penalty
+        self.max_length_offset = max_length_offset
+        self.pad_token_id = 0
+        self.eos_token_id = getattr(tgt_tokenizer, 'eos_token_id', 2)
+        self.bos_token_id = getattr(tgt_tokenizer, 'bos_token_id', 1)
+        
+    def beam_search(self, src, src_mask=None):
+        """
+        Beam search decoding for a single source sequence
+        Args:
+            src: [1, src_len] source sequence
+            src_mask: [1, src_len] source mask (optional)
+        Returns:
+            best_sequence: [tgt_len] best decoded sequence
+        """
+        batch_size = src.size(0)
+        assert batch_size == 1, "Beam search currently supports batch_size=1"
+        
+        device = src.device
+        src_len = src.size(1)
+        max_length = src_len + self.max_length_offset
+        
+        # Encode source
+        with torch.no_grad():
+            # Get encoder output (assuming model has separate encoder method)
+            if hasattr(self.model, 'encode'):
+                encoder_output = self.model.encode(src, src_mask)
+            else:
+                # Fallback: run full model with dummy target to get encoder states
+                dummy_tgt = torch.tensor([[self.bos_token_id]], device=device)
+                _ = self.model(src, dummy_tgt, src_pad_idx=self.pad_token_id, tgt_pad_idx=self.pad_token_id)
+                # This is a simplified approach; ideally model should expose encoder
+                encoder_output = None
+        
+        # Initialize beam
+        beams = [(torch.tensor([self.bos_token_id], device=device), 0.0)]  # (sequence, score)
+        completed_beams = []
+        
+        for step in range(max_length):
+            if len(beams) == 0:
+                break
+                
+            # Collect all current sequences for batch processing
+            current_sequences = []
+            current_scores = []
+            
+            for seq, score in beams:
+                if seq[-1] == self.eos_token_id:
+                    # Apply length penalty and add to completed beams
+                    length_penalty = ((5 + len(seq)) / 6) ** self.alpha
+                    final_score = score / length_penalty
+                    completed_beams.append((seq, final_score))
+                else:
+                    current_sequences.append(seq)
+                    current_scores.append(score)
+            
+            if not current_sequences:
+                break
+            
+            # Prepare batch input
+            max_seq_len = max(len(seq) for seq in current_sequences)
+            batch_tgt = torch.full((len(current_sequences), max_seq_len), 
+                                 self.pad_token_id, device=device)
+            
+            for i, seq in enumerate(current_sequences):
+                batch_tgt[i, :len(seq)] = seq
+            
+            # Expand source to match batch size
+            batch_src = src.expand(len(current_sequences), -1)
+            
+            # Get model predictions
+            with torch.no_grad():
+                output = self.model(batch_src, batch_tgt, 
+                                  src_pad_idx=self.pad_token_id, 
+                                  tgt_pad_idx=self.pad_token_id)
+                
+                # Get probabilities for next token (last position)
+                next_token_logits = output[:, -1, :]  # [batch_size, vocab_size]
+                next_token_probs = torch.log_softmax(next_token_logits, dim=-1)
+            
+            # Generate new beams
+            new_beams = []
+            
+            for i, (seq, score) in enumerate(zip(current_sequences, current_scores)):
+                # Get top-k next tokens
+                top_probs, top_indices = torch.topk(next_token_probs[i], self.beam_size)
+                
+                for prob, token_id in zip(top_probs, top_indices):
+                    new_seq = torch.cat([seq, token_id.unsqueeze(0)])
+                    new_score = score + prob.item()
+                    new_beams.append((new_seq, new_score))
+            
+            # Keep only top beam_size beams
+            new_beams.sort(key=lambda x: x[1], reverse=True)
+            beams = new_beams[:self.beam_size]
+        
+        # Add remaining beams to completed beams
+        for seq, score in beams:
+            length_penalty = ((5 + len(seq)) / 6) ** self.alpha
+            final_score = score / length_penalty
+            completed_beams.append((seq, final_score))
+        
+        # Return best sequence
+        if completed_beams:
+            best_seq, best_score = max(completed_beams, key=lambda x: x[1])
+            return best_seq[1:]  # Remove BOS token
+        else:
+            # Fallback to first beam
+            return beams[0][0][1:] if beams else torch.tensor([self.eos_token_id], device=device)
+    
+    def decode_batch(self, src_batch, src_mask_batch=None):
+        """
+        Decode a batch of sequences using beam search
+        Args:
+            src_batch: [batch_size, src_len]
+            src_mask_batch: [batch_size, src_len] (optional)
+        Returns:
+            decoded_sequences: list of decoded sequences
+        """
+        batch_size = src_batch.size(0)
+        decoded_sequences = []
+        
+        for i in range(batch_size):
+            src = src_batch[i:i+1]  # [1, src_len]
+            src_mask = src_mask_batch[i:i+1] if src_mask_batch is not None else None
+            
+            decoded_seq = self.beam_search(src, src_mask)
+            decoded_sequences.append(decoded_seq)
+        
+        return decoded_sequences
+
 class ModelEvaluator:
-    def __init__(self, checkpoint_path, device='auto'):
+    def __init__(self, checkpoint_path, device='auto', use_averaging=True, use_beam_search=True):
         self.checkpoint_path = checkpoint_path
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu') if device == 'auto' else device
         self.model = None
@@ -27,12 +169,40 @@ class ModelEvaluator:
         self.src_tokenizer = None
         self.tgt_tokenizer = None
         self.criterion = None
+        self.use_averaging = use_averaging
+        self.use_beam_search = use_beam_search
+        self.beam_decoder = None
         
         print(f"Evaluator initialized with device: {self.device}")
+        print(f"Checkpoint averaging: {'Enabled' if use_averaging else 'Disabled'}")
+        print(f"Beam search: {'Enabled' if use_beam_search else 'Disabled'}")
         
+    def find_recent_checkpoints(self, checkpoint_dir, max_checkpoints):
+        """최근 체크포인트들 찾기"""
+        checkpoint_pattern = os.path.join(checkpoint_dir, 'checkpoint_step_*.pth')
+        checkpoint_files = glob.glob(checkpoint_pattern)
+        
+        if not checkpoint_files:
+            return []
+        
+        # 스텝 번호로 정렬
+        def extract_step(filename):
+            match = re.search(r'checkpoint_step_(\d+)\.pth', filename)
+            return int(match.group(1)) if match else 0
+        
+        checkpoint_files.sort(key=extract_step, reverse=True)
+        return checkpoint_files[:max_checkpoints]
+    
     def load_checkpoint(self):
-        """체크포인트 로드"""
-        print(f"Loading checkpoint from: {self.checkpoint_path}")
+        """체크포인트 로드 (averaging 지원)"""
+        if self.use_averaging:
+            return self.load_averaged_checkpoint()
+        else:
+            return self.load_single_checkpoint()
+    
+    def load_single_checkpoint(self):
+        """단일 체크포인트 로드"""
+        print(f"Loading single checkpoint from: {self.checkpoint_path}")
         
         if not os.path.exists(self.checkpoint_path):
             raise FileNotFoundError(f"Checkpoint not found: {self.checkpoint_path}")
@@ -48,6 +218,91 @@ class ModelEvaluator:
             print(f"  - Validation loss: {checkpoint['val_loss']:.4f}")
         
         return checkpoint
+    
+    def load_averaged_checkpoint(self):
+        """여러 체크포인트 평균하여 로드"""
+        print(f"Loading and averaging multiple checkpoints...")
+        
+        # 체크포인트 디렉토리 찾기
+        if os.path.isfile(self.checkpoint_path):
+            checkpoint_dir = os.path.dirname(self.checkpoint_path)
+            
+            # config 로드를 위해 첫 번째 체크포인트 로드
+            first_checkpoint = torch.load(self.checkpoint_path, map_location=self.device)
+            self.config = first_checkpoint['config']
+        else:
+            checkpoint_dir = self.checkpoint_path
+            # 디렉토리에서 가장 최근 체크포인트로 config 로드
+            recent_checkpoints = self.find_recent_checkpoints(checkpoint_dir, 1)
+            if not recent_checkpoints:
+                raise FileNotFoundError(f"No checkpoints found in: {checkpoint_dir}")
+            first_checkpoint = torch.load(recent_checkpoints[0], map_location=self.device)
+            self.config = first_checkpoint['config']
+        
+        # config에서 max_checkpoints 읽기 (기본값: 5)
+        max_checkpoints = self.config['training'].get('max_checkpoints', 5)
+        print(f"  - Using max_checkpoints from config: {max_checkpoints}")
+        
+        # 최근 체크포인트들 찾기
+        recent_checkpoints = self.find_recent_checkpoints(checkpoint_dir, max_checkpoints)
+        
+        if not recent_checkpoints:
+            raise FileNotFoundError(f"No checkpoints found in: {checkpoint_dir}")
+        
+        print(f"  - Found {len(recent_checkpoints)} checkpoints to average:")
+        for i, cp_path in enumerate(recent_checkpoints):
+            cp_name = os.path.basename(cp_path)
+            print(f"    {i+1}. {cp_name}")
+        
+        # 체크포인트들 로드 및 평균 계산
+        averaged_state_dict = {}
+        checkpoint_info = {'steps': [], 'val_losses': []}
+        
+        for i, cp_path in enumerate(recent_checkpoints):
+            print(f"  - Loading checkpoint {i+1}/{len(recent_checkpoints)}: {os.path.basename(cp_path)}")
+            checkpoint = torch.load(cp_path, map_location=self.device)
+            
+            # 정보 수집
+            if 'step' in checkpoint:
+                checkpoint_info['steps'].append(checkpoint['step'])
+            if 'val_loss' in checkpoint:
+                checkpoint_info['val_losses'].append(checkpoint['val_loss'])
+            
+            # 모델 상태 평균화
+            model_state = checkpoint['model_state_dict']
+            
+            if i == 0:
+                # 첫 번째 체크포인트로 초기화
+                for key, value in model_state.items():
+                    averaged_state_dict[key] = value.clone().float()
+            else:
+                # 평균에 추가
+                for key, value in model_state.items():
+                    if key in averaged_state_dict:
+                        averaged_state_dict[key] += value.float()
+        
+        # 평균 계산
+        num_checkpoints = len(recent_checkpoints)
+        for key in averaged_state_dict:
+            averaged_state_dict[key] /= num_checkpoints
+        
+        # 평균화된 체크포인트 생성
+        averaged_checkpoint = {
+            'model_state_dict': averaged_state_dict,
+            'config': self.config,
+            'averaged_from': len(recent_checkpoints),
+            'checkpoint_steps': checkpoint_info['steps'],
+            'checkpoint_val_losses': checkpoint_info['val_losses']
+        }
+        
+        print(f"✓ Averaged {num_checkpoints} checkpoints")
+        if checkpoint_info['steps']:
+            print(f"  - Step range: {min(checkpoint_info['steps'])} - {max(checkpoint_info['steps'])}")
+        if checkpoint_info['val_losses']:
+            avg_val_loss = sum(checkpoint_info['val_losses']) / len(checkpoint_info['val_losses'])
+            print(f"  - Average validation loss: {avg_val_loss:.4f}")
+        
+        return averaged_checkpoint
     
     def load_tokenizers(self):
         """BPE 토크나이저 로드 (trainer와 동일한 방식)"""
@@ -123,6 +378,22 @@ class ModelEvaluator:
         )
         
         print(f"✓ Label smoothing loss initialized (smoothing={training_config['label_smoothing']})")
+        
+        # Beam Search Decoder 초기화
+        if self.use_beam_search:
+            # Transformer paper 설정: beam_size=4, alpha=0.6
+            beam_size = 4
+            alpha = 0.6
+            max_length_offset = 50
+            
+            self.beam_decoder = BeamSearchDecoder(
+                model=self.model,
+                tgt_tokenizer=self.tgt_tokenizer,
+                beam_size=beam_size,
+                alpha=alpha,
+                max_length_offset=max_length_offset
+            )
+            print(f"✓ Beam search decoder initialized (beam_size={beam_size}, alpha={alpha}, max_offset={max_length_offset})")
     
     def prepare_data(self, data_type='validation'):
         """평가용 데이터 준비 (trainer와 동일한 방식)"""
@@ -267,6 +538,102 @@ class ModelEvaluator:
         
         # 최종 결과 계산 및 출력
         results = metrics.get_summary()
+        metrics.print_summary()
+        
+        return results
+    
+    def evaluate_with_beam_search(self, max_batches=None):
+        """Beam Search를 사용한 평가 (Transformer paper 방식)"""
+        if not self.use_beam_search or self.beam_decoder is None:
+            print("⚠️  Beam search is not enabled. Using greedy decoding instead.")
+            return self.evaluate_full(max_batches)
+        
+        print("\nStarting evaluation with Beam Search (beam_size=4, alpha=0.6)...")
+        
+        self.model.eval()
+        metrics = EvaluationMetrics()
+        
+        with torch.no_grad():
+            progress_bar = tqdm(self.eval_loader, desc="Beam Search Evaluation")
+            
+            for batch_idx, batch in enumerate(progress_bar):
+                if max_batches and batch_idx >= max_batches:
+                    break
+                
+                # 데이터 이동
+                src = batch['src'].to(self.device, non_blocking=True)
+                tgt_output = batch['tgt_output'].to(self.device, non_blocking=True)
+                
+                # Beam Search 디코딩 (배치별로 처리)
+                batch_size = src.size(0)
+                beam_predictions = []
+                
+                for i in range(batch_size):
+                    src_seq = src[i:i+1]  # [1, src_len]
+                    
+                    # Beam search로 디코딩
+                    decoded_seq = self.beam_decoder.beam_search(src_seq)
+                    beam_predictions.append(decoded_seq)
+                
+                # 배치 크기에 맞게 패딩
+                if beam_predictions:
+                    max_pred_len = max(len(pred) for pred in beam_predictions)
+                    padded_predictions = torch.full((batch_size, max_pred_len), 
+                                                  self.beam_decoder.pad_token_id, 
+                                                  device=self.device)
+                    
+                    for i, pred in enumerate(beam_predictions):
+                        padded_predictions[i, :len(pred)] = pred
+                    
+                    predictions = padded_predictions
+                else:
+                    continue
+                
+                # Teacher forcing으로 loss 계산 (beam search와 별개)
+                tgt_input = batch['tgt_input'].to(self.device, non_blocking=True)
+                output = self.model(src, tgt_input, src_pad_idx=0, tgt_pad_idx=0)
+                loss = self.criterion(output, tgt_output)
+                
+                # NaN/Inf 체크
+                if torch.isnan(loss) or torch.isinf(loss):
+                    print(f"⚠️  NaN/Inf loss detected in batch {batch_idx}!")
+                    continue
+                
+                # 손실 업데이트
+                batch_tokens = (tgt_output != 0).sum().item()
+                metrics.update_loss(loss.item(), batch_tokens)
+                
+                # 텍스트로 디코딩하여 BLEU 스코어 계산
+                src_texts, tgt_texts, pred_texts = batch_decode_for_evaluation(
+                    src, tgt_output, predictions,
+                    self.src_tokenizer, self.tgt_tokenizer, pad_token_id=0
+                )
+                
+                # 빈 텍스트 필터링
+                valid_pairs = [(pred, tgt) for pred, tgt in zip(pred_texts, tgt_texts) 
+                              if pred.strip() and tgt.strip()]
+                
+                if valid_pairs:
+                    valid_preds, valid_tgts = zip(*valid_pairs)
+                    metrics.add_predictions(list(valid_preds), list(valid_tgts))
+                
+                # 진행률 업데이트
+                current_summary = metrics.get_summary()
+                if current_summary:
+                    progress_bar.set_postfix({
+                        'loss': f'{loss.item():.4f}',
+                        'avg_loss': f'{current_summary["average_loss"]:.4f}',
+                        'ppl': f'{current_summary["perplexity"]:.1f}',
+                        'bleu': f'{current_summary.get("bleu", 0):.2f}',
+                        'samples': len(metrics.predictions)
+                    })
+        
+        # 최종 결과 계산 및 출력
+        results = metrics.get_summary()
+        print(f"\n🎯 Beam Search Evaluation Results:")
+        print(f"   - BLEU Score: {results.get('bleu', 0):.2f}")
+        print(f"   - Perplexity: {results.get('perplexity', 0):.2f}")
+        print(f"   - Average Loss: {results.get('average_loss', 0):.4f}")
         metrics.print_summary()
         
         return results
@@ -421,12 +788,12 @@ class ModelEvaluator:
         print(f"  - loss_analysis.png")
 
 def main():
-    parser = argparse.ArgumentParser(description='체크포인트에서 모델 평가 (trainer 호환)')
-    parser.add_argument('checkpoint', type=str, help='체크포인트 파일 경로')
+    parser = argparse.ArgumentParser(description='체크포인트에서 모델 평가 (Transformer paper 방식)')
+    parser.add_argument('checkpoint', type=str, help='체크포인트 파일 또는 디렉토리 경로')
     parser.add_argument('--data_type', type=str, default='validation', 
                        choices=['validation', 'train', 'test'], help='평가할 데이터 타입')
     parser.add_argument('--max_batches', type=int, default=None, 
-                       help='최대 평가 배치 수 (None이면 전체, trainer 기본값: 20)')
+                       help='최대 평가 배치 수 (None이면 전체)')
     parser.add_argument('--num_samples', type=int, default=5, 
                        help='상세 분석할 샘플 수')
     parser.add_argument('--output_dir', type=str, default=None, 
@@ -435,6 +802,14 @@ def main():
                        help='샘플 분석 생략')
     parser.add_argument('--device', type=str, default='auto',
                        help='사용할 디바이스 (auto/cuda/cpu)')
+    parser.add_argument('--no_averaging', action='store_true',
+                       help='체크포인트 평균화 비활성화')
+    parser.add_argument('--no_beam_search', action='store_true',
+                       help='Beam search 비활성화 (greedy decoding 사용)')
+    parser.add_argument('--beam_size', type=int, default=4,
+                       help='Beam search beam size (기본값: 4)')
+    parser.add_argument('--length_penalty', type=float, default=0.6,
+                       help='Length penalty alpha (기본값: 0.6)')
     
     args = parser.parse_args()
     
@@ -444,17 +819,24 @@ def main():
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         args.output_dir = f"evaluation_{checkpoint_name}_{timestamp}"
     
-    print("Transformer 모델 평가 시작 (Trainer 호환 버전)")
-    print("=" * 60)
+    print("Transformer 모델 평가 시작 (Transformer Paper 방식)")
+    print("=" * 70)
     print(f"체크포인트: {args.checkpoint}")
     print(f"데이터 타입: {args.data_type}")
     print(f"최대 배치: {args.max_batches or 'All'}")
     print(f"디바이스: {args.device}")
+    print(f"체크포인트 평균화: {'Disabled' if args.no_averaging else 'Enabled'}")
+    print(f"Beam Search: {'Disabled' if args.no_beam_search else f'Enabled (size={args.beam_size}, α={args.length_penalty})'}")
     print(f"출력 디렉토리: {args.output_dir}")
-    print("=" * 60)
+    print("=" * 70)
     
-    # 평가자 생성 (trainer와 동일한 device 설정)
-    evaluator = ModelEvaluator(args.checkpoint, device=args.device)
+    # 평가자 생성
+    evaluator = ModelEvaluator(
+        args.checkpoint, 
+        device=args.device,
+        use_averaging=not args.no_averaging,
+        use_beam_search=not args.no_beam_search
+    )
     
     # 체크포인트 로드
     checkpoint = evaluator.load_checkpoint()
@@ -468,8 +850,17 @@ def main():
     # 데이터 준비
     evaluator.prepare_data(args.data_type)
     
-    # 전체 평가
-    results = evaluator.evaluate_full(args.max_batches)
+    # Beam search 파라미터 업데이트 (사용자 설정이 있는 경우)
+    if evaluator.use_beam_search and evaluator.beam_decoder:
+        evaluator.beam_decoder.beam_size = args.beam_size
+        evaluator.beam_decoder.alpha = args.length_penalty
+        print(f"✓ Beam search parameters updated: beam_size={args.beam_size}, alpha={args.length_penalty}")
+    
+    # 전체 평가 (Beam search 또는 일반 평가)
+    if evaluator.use_beam_search:
+        results = evaluator.evaluate_with_beam_search(args.max_batches)
+    else:
+        results = evaluator.evaluate_full(args.max_batches)
     
     # 샘플 분석
     if not args.no_samples:
@@ -478,7 +869,13 @@ def main():
     # 결과 저장
     evaluator.save_results(results, args.output_dir)
     
-    print(f"\n평가 완료! 결과는 {args.output_dir}에 저장되었습니다.")
+    print(f"\n🎉 평가 완료!")
+    print(f"📊 최종 결과:")
+    print(f"   - BLEU Score: {results.get('bleu', 0):.2f}")
+    print(f"   - Perplexity: {results.get('perplexity', 0):.2f}")
+    print(f"   - 평가 방식: {'Beam Search' if evaluator.use_beam_search else 'Greedy'}")
+    print(f"   - 체크포인트 평균화: {'Yes' if evaluator.use_averaging else 'No'}")
+    print(f"📁 결과 저장 위치: {args.output_dir}")
 
 if __name__ == "__main__":
     main()
