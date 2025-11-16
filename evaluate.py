@@ -15,7 +15,7 @@ from src.model import Transformer
 from src.data_utils import create_tokenizer, create_token_based_data_loader, load_tokenizer
 from src.trainer import LabelSmoothingLoss
 from src.metrics import EvaluationMetrics, batch_decode_for_evaluation
-from src.bpe_adapter import load_bpe_tokenizers, create_bpe_token_based_data_loader
+from src.bpe_adapter import load_bpe_tokenizers, create_bpe_token_based_data_loader, save_bpe_tokenizers
 from src.data_loader import load_problem_data, clean_sentence_pairs
 
 class ModelEvaluator:
@@ -50,7 +50,7 @@ class ModelEvaluator:
         return checkpoint
     
     def load_tokenizers(self):
-        """BPE 토크나이저 로드"""
+        """BPE 토크나이저 로드 (trainer와 동일한 방식)"""
         print("Loading BPE tokenizers...")
         
         src_model_path = "tokenizers/src_bpe.model"
@@ -58,27 +58,23 @@ class ModelEvaluator:
         
         if os.path.exists(src_model_path) and os.path.exists(tgt_model_path):
             self.src_tokenizer, self.tgt_tokenizer = load_bpe_tokenizers()
-            print(f"Loaded BPE tokenizers from saved model files")
+            print(f"✓ Loaded BPE tokenizers from saved model files")
         else:
-            print("Saved BPE tokenizers not found. Trying legacy tokenizers...")
-            # 레거시 토크나이저 시도
-            src_tokenizer_path = "tokenizers/src_tokenizer.json"
-            tgt_tokenizer_path = "tokenizers/tgt_tokenizer.json"
+            print("⚠️  Saved BPE tokenizers not found. Creating new BPE tokenizers...")
+            from src.bpe_adapter import create_bpe_tokenizers
             
-            if os.path.exists(src_tokenizer_path) and os.path.exists(tgt_tokenizer_path):
-                self.src_tokenizer = load_tokenizer(src_tokenizer_path)
-                self.tgt_tokenizer = load_tokenizer(tgt_tokenizer_path)
-                print(f"Loaded legacy tokenizers from JSON files")
-            else:
-                print("No tokenizers found. Creating new BPE tokenizers...")
-                from src.bpe_adapter import create_bpe_tokenizers
-                self.src_tokenizer, self.tgt_tokenizer = create_bpe_tokenizers(self.config)
+            # 새로운 BPE 토크나이저 생성 (trainer와 동일한 방식)
+            self.src_tokenizer, self.tgt_tokenizer = create_bpe_tokenizers(self.config)
+            
+            # 토크나이저 저장 (trainer와 동일한 방식)
+            save_bpe_tokenizers(self.src_tokenizer, self.tgt_tokenizer)
+            print(f"✓ Created and saved new BPE tokenizers")
         
         print(f"Source vocabulary size: {self.src_tokenizer.get_vocab_size()}")
         print(f"Target vocabulary size: {self.tgt_tokenizer.get_vocab_size()}")
     
     def build_model(self, checkpoint):
-        """모델 구성 및 가중치 로드"""
+        """모델 구성 및 가중치 로드 (trainer와 동일한 방식)"""
         print("Building and loading model...")
         
         model_config = self.config['model']
@@ -93,7 +89,14 @@ class ModelEvaluator:
             max_seq_length=model_config['max_seq_length']
         ).to(self.device)
         
-        # 드롭아웃 설정
+        # Gradient Checkpointing 활성화 (trainer와 동일)
+        if hasattr(self.model, 'gradient_checkpointing_enable'):
+            self.model.gradient_checkpointing_enable()
+            print("✓ Gradient checkpointing enabled")
+        else:
+            print("⚠️  Gradient checkpointing not available")
+        
+        # 드롭아웃 설정 (trainer와 동일한 방식)
         for module in self.model.modules():
             if isinstance(module, nn.Dropout):
                 module.p = model_config['P_drop']
@@ -103,45 +106,59 @@ class ModelEvaluator:
         self.model.eval()
         
         total_params = sum(p.numel() for p in self.model.parameters())
-        print(f"Model loaded successfully")
-        print(f"Total parameters: {total_params:,}")
-        print(f"Model size (MB): {total_params * 4 / (1024**2):.2f}")
+        trainable_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
         
-        # 손실 함수 설정
+        print(f"✓ Model loaded successfully")
+        print(f"Total parameters: {total_params:,}")
+        print(f"Trainable parameters: {trainable_params:,}")
+        print(f"Model size (FP32): {total_params * 4 / (1024**2):.2f} MB")
+        print(f"Model size (FP16): {total_params * 2 / (1024**2):.2f} MB")
+        
+        # 손실 함수 설정 (trainer와 동일한 LabelSmoothingLoss)
         training_config = self.config['training']
         self.criterion = LabelSmoothingLoss(
             self.tgt_tokenizer.get_vocab_size(),
             smoothing=training_config['label_smoothing'],
             ignore_index=0
         )
+        
+        print(f"✓ Label smoothing loss initialized (smoothing={training_config['label_smoothing']})")
     
     def prepare_data(self, data_type='validation'):
-        """평가용 데이터 준비 (실제 데이터 파일 사용, BPE 토크나이저 지원)"""
+        """평가용 데이터 준비 (trainer와 동일한 방식)"""
         print(f"Preparing {data_type} data with BPE tokenizers...")
         
-        # 실제 데이터 로드
+        # 실제 데이터 로드 (trainer와 동일한 방식)
         train_data, val_data, test_data = load_problem_data(self.config)
+        train_src, train_tgt = train_data
+        val_src, val_tgt = val_data
         
+        print(f"Loaded data:")
+        print(f"  - Train pairs: {len(train_src):,}")
+        print(f"  - Valid pairs: {len(val_src):,}")
+        print(f"  - Test pairs: {len(test_data[0]):,}")
+        
+        # 데이터 선택
         data_config = self.config['data']
         
         if data_type == 'validation':
-            eval_src, eval_tgt = val_data
+            eval_src, eval_tgt = val_src, val_tgt
         elif data_type == 'test':
             eval_src, eval_tgt = test_data
         elif data_type == 'train':
-            eval_src, eval_tgt = train_data
+            eval_src, eval_tgt = train_src, train_tgt
         else:
             raise ValueError(f"Unsupported data_type: {data_type}. Use 'train', 'validation', or 'test'")
         
-        print(f"Loaded {data_type} data: {len(eval_src):,} pairs")
-        
-        # 데이터 클리닝 적용 (config 설정에 따라)
+        # 데이터 클리닝 적용 (trainer와 동일한 방식)
         if data_config.get('apply_cleaning', True):
             print("Applying data cleaning...")
             eval_src, eval_tgt = clean_sentence_pairs(eval_src, eval_tgt)
-            print(f"After cleaning: {len(eval_src):,} pairs")
+            
+            print(f"After cleaning:")
+            print(f"  - {data_type.title()} pairs: {len(eval_src):,}")
         
-        # 빈 데이터 확인
+        # 빈 데이터 확인 (trainer와 동일한 방식)
         if not eval_src or not eval_tgt:
             print("⚠️  No evaluation data found! Creating sample data for testing...")
             from src.data_loader import create_data_sample_for_testing
@@ -151,26 +168,31 @@ class ModelEvaluator:
             
             # 다시 로드
             train_data, val_data, test_data = load_problem_data(self.config)
+            train_src, train_tgt = train_data
+            val_src, val_tgt = val_data
+            
             if data_type == 'validation':
-                eval_src, eval_tgt = val_data
+                eval_src, eval_tgt = val_src, val_tgt
             elif data_type == 'test':
                 eval_src, eval_tgt = test_data
             else:
-                eval_src, eval_tgt = train_data
+                eval_src, eval_tgt = train_src, train_tgt
+            
+            print(f"Using sample data:")
+            print(f"  - {data_type.title()} pairs: {len(eval_src):,}")
         
-        # BPE 기반 데이터로더 생성
+        # BPE 기반 토큰 데이터 로더 생성 (trainer와 동일한 방식)
         batch_tokens = self.config['training']['batch_tokens']
         max_length = data_config['max_length']
         
-        # BPE 토크나이저 사용 (항상 BPE 사용)
+        print(f"Creating BPE token-based data loader with {batch_tokens} tokens per batch...")
+        
         self.eval_loader = create_bpe_token_based_data_loader(
             eval_src, eval_tgt, self.src_tokenizer, self.tgt_tokenizer,
             batch_tokens=batch_tokens, max_length=max_length, shuffle=False
         )
         
-        print(f"Data prepared: {data_type} set with {len(eval_src)} samples")
-        
-        # 샘플 배치 정보
+        # 배치 정보 출력 (trainer와 동일한 방식)
         sample_batch = next(iter(self.eval_loader))
         src_tokens = (sample_batch['src'] != 0).sum().item()
         tgt_tokens = (sample_batch['tgt_input'] != 0).sum().item()
@@ -178,11 +200,14 @@ class ModelEvaluator:
         
         print(f"Sample batch info:")
         print(f"  - Batch size (sentences): {sample_batch['src'].size(0)}")
+        print(f"  - Max sequence length: {sample_batch['src'].size(1)}")
+        print(f"  - Source tokens: {src_tokens}")
+        print(f"  - Target tokens: {tgt_tokens}")
         print(f"  - Total tokens in batch: {total_tokens}")
         print(f"  - Target batch tokens: {batch_tokens}")
     
     def evaluate_full(self, max_batches=None):
-        """전체 데이터에 대한 상세 평가 (BLEU Score와 Perplexity 포함)"""
+        """전체 데이터에 대한 상세 평가 (trainer의 evaluate와 호환)"""
         print("\nStarting full evaluation with BLEU and Perplexity metrics...")
         
         self.model.eval()
@@ -195,14 +220,22 @@ class ModelEvaluator:
                 if max_batches and batch_idx >= max_batches:
                     break
                 
-                src = batch['src'].to(self.device)
-                tgt_input = batch['tgt_input'].to(self.device)
-                tgt_output = batch['tgt_output'].to(self.device)
+                # 데이터 이동 (trainer와 동일한 방식)
+                src = batch['src'].to(self.device, non_blocking=True)
+                tgt_input = batch['tgt_input'].to(self.device, non_blocking=True)
+                tgt_output = batch['tgt_output'].to(self.device, non_blocking=True)
                 
-                # 모델 예측
+                # 모델 예측 (trainer와 동일한 방식)
                 output = self.model(src, tgt_input, src_pad_idx=0, tgt_pad_idx=0)
                 loss = self.criterion(output, tgt_output)
                 predictions = torch.argmax(output, dim=-1)
+                
+                # NaN/Inf 체크 (trainer와 동일한 안전장치)
+                if torch.isnan(loss) or torch.isinf(loss):
+                    print(f"⚠️  NaN/Inf loss detected in batch {batch_idx}!")
+                    print(f"   Loss value: {loss.item()}")
+                    print(f"   Output stats: min={output.min():.4f}, max={output.max():.4f}")
+                    continue
                 
                 # 손실 업데이트
                 batch_tokens = (tgt_output != 0).sum().item()
@@ -388,18 +421,20 @@ class ModelEvaluator:
         print(f"  - loss_analysis.png")
 
 def main():
-    parser = argparse.ArgumentParser(description='체크포인트에서 모델 평가')
+    parser = argparse.ArgumentParser(description='체크포인트에서 모델 평가 (trainer 호환)')
     parser.add_argument('checkpoint', type=str, help='체크포인트 파일 경로')
     parser.add_argument('--data_type', type=str, default='validation', 
-                       choices=['validation', 'train'], help='평가할 데이터 타입')
+                       choices=['validation', 'train', 'test'], help='평가할 데이터 타입')
     parser.add_argument('--max_batches', type=int, default=None, 
-                       help='최대 평가 배치 수 (None이면 전체)')
+                       help='최대 평가 배치 수 (None이면 전체, trainer 기본값: 20)')
     parser.add_argument('--num_samples', type=int, default=5, 
                        help='상세 분석할 샘플 수')
     parser.add_argument('--output_dir', type=str, default=None, 
                        help='결과 저장 디렉토리')
     parser.add_argument('--no_samples', action='store_true', 
                        help='샘플 분석 생략')
+    parser.add_argument('--device', type=str, default='auto',
+                       help='사용할 디바이스 (auto/cuda/cpu)')
     
     args = parser.parse_args()
     
@@ -409,16 +444,17 @@ def main():
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         args.output_dir = f"evaluation_{checkpoint_name}_{timestamp}"
     
-    print("Transformer 모델 평가 시작")
+    print("Transformer 모델 평가 시작 (Trainer 호환 버전)")
     print("=" * 60)
     print(f"체크포인트: {args.checkpoint}")
     print(f"데이터 타입: {args.data_type}")
     print(f"최대 배치: {args.max_batches or 'All'}")
+    print(f"디바이스: {args.device}")
     print(f"출력 디렉토리: {args.output_dir}")
     print("=" * 60)
     
-    # 평가자 생성
-    evaluator = ModelEvaluator(args.checkpoint)
+    # 평가자 생성 (trainer와 동일한 device 설정)
+    evaluator = ModelEvaluator(args.checkpoint, device=args.device)
     
     # 체크포인트 로드
     checkpoint = evaluator.load_checkpoint()
