@@ -1,0 +1,33 @@
+{
+  "model": {
+    "N": 6,
+    "d_model": 512,
+    "d_ff": 2048,
+    "h": 8,
+    "d_k": 64,
+    "d_v": 64,
+    "P_drop": 0.1,
+    "max_seq_length": 128
+  },
+  "training": {
+    "train_steps": 100000,
+    "batch_tokens": 25000,
+    "learning_rate": 1e-4,
+    "warmup_steps": 4000,
+    "label_smoothing": 0.1,
+    "grad_clip": 1.0,
+    "eval_every": 2500,
+    "save_every": 2000,
+    "max_checkpoints": 5
+  },
+  "data": {
+    "problem": "wmt14_en_de",
+    "src_lang": "en",
+    "tgt_lang": "de",
+    "data_dir": "./data",
+    "vocab_size": 37000,
+    "max_length": 128,
+    "apply_cleaning": true
+  },
+  "description": "Base Transformer model"
+}
