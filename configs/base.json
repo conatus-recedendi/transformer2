@@ -19,7 +19,7 @@
     "eval_every": 2500,
     "save_every": 5000,
     "max_checkpoints": 5,
-    "update_freq": 4
+    "update_freq": 8
   },
   "data": {
     "problem": "wmt14_en_de",
