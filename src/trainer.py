@@ -95,11 +95,9 @@ class TransformerTrainer:
         self.accumulated_tokens = 0
         self.update_step = 0  # 실제 업데이트 스텝 (gradient accumulation 고려)
 
-        # WMP (Words/tokens per Minute) 추적을 위한 변수들
-        self.start_time = None
-        self.total_tokens_processed = 0
-        self.last_wmp_time = None
-        self.last_wmp_tokens = 0
+        # WMP (Words/tokens per Update) 추적을 위한 변수들
+        self.total_updates = 0
+        self.total_tokens_in_updates = 0
 
         # Mixed precision 설정 (더 안전한 설정)
         if self.device.type == "cuda":
@@ -392,8 +390,6 @@ class TransformerTrainer:
         print("=" * 60)
 
         start_time = time.time()
-        self.start_time = start_time
-        self.last_wmp_time = start_time
         self.model.train()
 
         # 무한 데이터 로더 생성 (train_steps만큼 반복)
@@ -419,7 +415,6 @@ class TransformerTrainer:
 
             # 현재 배치의 토큰 수 계산 (패딩 제외)
             current_batch_tokens = (tgt_output != 0).sum().item()
-            self.total_tokens_processed += current_batch_tokens
             self.accumulated_tokens += current_batch_tokens
 
             # Gradient accumulation 시작 시에만 zero_grad
@@ -600,6 +595,10 @@ class TransformerTrainer:
                 avg_accumulated_loss = self.accumulated_loss / self.update_freq
                 running_loss += avg_accumulated_loss
 
+                # WMP 계산을 위한 업데이트 정보 저장
+                self.total_updates += 1
+                self.total_tokens_in_updates += self.accumulated_tokens
+
                 # Reset accumulation
                 self.accumulated_loss = 0.0
                 accumulated_tokens_for_update = self.accumulated_tokens
@@ -619,28 +618,20 @@ class TransformerTrainer:
                 current_tokens = (src != 0).sum().item() + (tgt_input != 0).sum().item()
                 batch_size = src.size(0)
 
-                # WMP (Words/tokens per Minute) 계산
-                current_time = time.time()
-                if self.last_wmp_time is not None:
-                    time_elapsed = current_time - self.last_wmp_time
-                    tokens_since_last = (
-                        self.total_tokens_processed - self.last_wmp_tokens
-                    )
-                    if time_elapsed > 0:
-                        wmp = tokens_since_last / (
-                            time_elapsed / 60.0
-                        )  # tokens per minute
-                    else:
-                        wmp = 0
+                # WMP (Words/tokens per Update) 계산
+                if self.total_updates > 0:
+                    wmp = (
+                        self.total_tokens_in_updates / self.total_updates
+                    )  # 업데이트당 평균 토큰 수
                 else:
                     wmp = 0
 
-                # 전체 평균 WMP
-                total_time_elapsed = current_time - self.start_time
-                if total_time_elapsed > 0:
-                    avg_wmp = self.total_tokens_processed / (total_time_elapsed / 60.0)
-                else:
-                    avg_wmp = 0
+                # 현재 업데이트의 토큰 수 (accumulated_tokens_for_update 사용)
+                current_update_tokens = (
+                    accumulated_tokens_for_update
+                    if "accumulated_tokens_for_update" in locals()
+                    else 0
+                )
 
                 # LR 스케줄러 정보
                 lr_info = self.scheduler.get_lr_info()
@@ -652,17 +643,13 @@ class TransformerTrainer:
                     f"Loss: {avg_loss:.4f} | "
                     f"LR: {lr_info['current_lr']:.2e} ({warmup_status}) | "
                     f"Batch: {batch_size} sents, {current_tokens} tokens | "
-                    f"WMP: {wmp:.0f} (avg: {avg_wmp:.0f}) | "
+                    f"WMP: {wmp:.0f} (current: {current_update_tokens}) | "
                     f"UF: {self.update_freq}"
                 )
 
                 train_losses.append(avg_loss)
                 steps.append(step)
                 running_loss = 0
-
-                # WMP 추적 변수 업데이트
-                self.last_wmp_time = current_time
-                self.last_wmp_tokens = self.total_tokens_processed
 
             # 평가 (실제 업데이트가 발생한 스텝에서만)
             if step % eval_every == 0 and step % self.update_freq == 0:
