@@ -22,7 +22,7 @@
     "update_freq": 4
   },
   "data": {
-    "problem": "wmt14_en_de",
+    "problem": "wmt17_en_de",
     "src_lang": "en",
     "tgt_lang": "de",
     "data_dir": "./data",
