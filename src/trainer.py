@@ -627,22 +627,51 @@ class TransformerTrainer:
                     wmp = 0
 
                 # 현재 업데이트의 토큰 수 (accumulated_tokens_for_update 사용)
-                current_update_tokens = (
-                    accumulated_tokens_for_update
-                    if "accumulated_tokens_for_update" in locals()
-                    else 0
-                )
+                current_update_tokens = accumulated_tokens_for_update
+
+                # 예상 학습 시간 계산
+                current_time = time.time()
+                elapsed_time = current_time - start_time
+                progress = step / train_steps
+
+                if progress > 0:
+                    estimated_total_time = elapsed_time / progress
+                    remaining_time = estimated_total_time - elapsed_time
+
+                    # 시간을 시:분:초 형태로 변환
+                    def format_time(seconds):
+                        if seconds < 0:
+                            return "00:00:00"
+                        hours = int(seconds // 3600)
+                        minutes = int((seconds % 3600) // 60)
+                        seconds = int(seconds % 60)
+                        return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
+                    eta_str = format_time(remaining_time)
+                    elapsed_str = format_time(elapsed_time)
+
+                    # 스텝/초 계산
+                    steps_per_sec = step / elapsed_time if elapsed_time > 0 else 0
+                else:
+                    eta_str = "??:??:??"
+                    elapsed_str = "00:00:00"
+                    steps_per_sec = 0
 
                 # LR 스케줄러 정보
                 lr_info = self.scheduler.get_lr_info()
                 warmup_status = "Warmup" if lr_info["is_warmup"] else "Decay"
 
                 print(
-                    f"Step {step:5d}/{train_steps} | "
+                    f"Step {step:5d}/{train_steps} ({progress*100:.1f}%) | "
                     f"Update {self.update_step:5d} | "
                     f"Loss: {avg_loss:.4f} | "
                     f"LR: {lr_info['current_lr']:.2e} ({warmup_status}) | "
-                    f"Batch: {batch_size} sents, {current_tokens} tokens | "
+                    f"Speed: {steps_per_sec:.1f} step/s | "
+                    f"ETA: {eta_str} | "
+                    f"Elapsed: {elapsed_str}"
+                )
+                print(
+                    f"  Batch: {batch_size} sents, {current_tokens} tokens | "
                     f"WMP: {wmp:.0f} (current: {current_update_tokens}) | "
                     f"UF: {self.update_freq}"
                 )
