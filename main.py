@@ -61,6 +61,8 @@ def merge_config_with_args(config, args):
         config["data"]["data_multiplier"] = args.data_multiplier
     if args.warmup_steps is not None:
         config["training"]["warmup_steps"] = args.warmup_steps
+    if args.update_freq is not None:
+        config["training"]["update_freq"] = args.update_freq
 
     return config
 
@@ -163,6 +165,12 @@ def main():
         type=int,
         default=None,
         help="워밍업 스텝 (config 파일 덮어쓰기)",
+    )
+    parser.add_argument(
+        "--update_freq",
+        type=int,
+        default=None,
+        help="업데이트 빈도 (gradient accumulation)",
     )
     parser.add_argument("--save_dir", type=str, default=None, help="저장 디렉토리")
     parser.add_argument(

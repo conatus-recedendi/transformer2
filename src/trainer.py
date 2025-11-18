@@ -88,6 +88,19 @@ class TransformerTrainer:
         self.scheduler = None
         # 체크포인트 관리를 위한 리스트
         self.checkpoint_files = []
+
+        # Update frequency와 gradient accumulation 설정
+        self.update_freq = self.config["training"].get("update_freq", 1)
+        self.accumulated_loss = 0.0
+        self.accumulated_tokens = 0
+        self.update_step = 0  # 실제 업데이트 스텝 (gradient accumulation 고려)
+
+        # WMP (Words/tokens per Minute) 추적을 위한 변수들
+        self.start_time = None
+        self.total_tokens_processed = 0
+        self.last_wmp_time = None
+        self.last_wmp_tokens = 0
+
         # Mixed precision 설정 (더 안전한 설정)
         if self.device.type == "cuda":
             self.scaler = GradScaler(
@@ -379,6 +392,8 @@ class TransformerTrainer:
         print("=" * 60)
 
         start_time = time.time()
+        self.start_time = start_time
+        self.last_wmp_time = start_time
         self.model.train()
 
         # 무한 데이터 로더 생성 (train_steps만큼 반복)
@@ -391,6 +406,10 @@ class TransformerTrainer:
         running_loss = 0
         log_every = 50  # 50스텝마다 로그 출력
 
+        # Gradient accumulation을 위한 변수들
+        self.accumulated_loss = 0.0
+        self.accumulated_tokens = 0
+
         # 현재 스텝부터 목표 스텝까지 학습
         for step in range(current_step + 1, train_steps + 1):
             batch = next(data_iter)
@@ -398,8 +417,14 @@ class TransformerTrainer:
             tgt_input = batch["tgt_input"].to(self.device, non_blocking=True)
             tgt_output = batch["tgt_output"].to(self.device, non_blocking=True)
 
-            # 🚀 메모리 효율적인 gradient 초기화
-            self.optimizer.zero_grad(set_to_none=True)  # 메모리 절약
+            # 현재 배치의 토큰 수 계산 (패딩 제외)
+            current_batch_tokens = (tgt_output != 0).sum().item()
+            self.total_tokens_processed += current_batch_tokens
+            self.accumulated_tokens += current_batch_tokens
+
+            # Gradient accumulation 시작 시에만 zero_grad
+            if step % self.update_freq == 1 or self.update_freq == 1:
+                self.optimizer.zero_grad(set_to_none=True)  # 메모리 절약
 
             # Mixed Precision Training with 강화된 안전성 체크
             if self.use_amp:
@@ -434,8 +459,11 @@ class TransformerTrainer:
                         print(f"⚠️  Scale is getting high: {current_scale}")
                         print(f"   Consider reducing growth_factor or growth_interval")
 
+                # Loss를 update_freq로 나누어 gradient accumulation 적용
+                scaled_loss = loss / self.update_freq
+
                 # Scaled backward pass
-                self.scaler.scale(loss).backward()
+                self.scaler.scale(scaled_loss).backward()
 
                 # 🔍 Gradient 안전성 체크 (unscale 전에 스케일된 gradient 체크)
                 scaled_grad_norm_sq = 0
@@ -510,9 +538,14 @@ class TransformerTrainer:
                     self.scale_overflow_count += 1
                     continue
 
-                # 정상적인 step
-                self.scaler.step(self.optimizer)
-                self.scaler.update()
+                # Update frequency에 따른 실제 optimizer step
+                if step % self.update_freq == 0:
+                    # 정상적인 step
+                    self.scaler.step(self.optimizer)
+                    self.scaler.update()
+                else:
+                    # Gradient accumulation 중일 때는 scaler update만
+                    self.scaler.update()
             else:
                 # 일반 FP32 학습
                 output = self.model(src, tgt_input, src_pad_idx=0, tgt_pad_idx=0)
@@ -531,7 +564,9 @@ class TransformerTrainer:
                 #     print(f"🔍 Memory Debug at Step {step}:")
                 #     print(f"   Before backward: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
 
-                loss.backward()
+                # Loss를 update_freq로 나누어 gradient accumulation 적용
+                scaled_loss = loss / self.update_freq
+                scaled_loss.backward()
 
                 # if step % 100 == 1:
                 #     print(f"   After backward: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
@@ -548,14 +583,64 @@ class TransformerTrainer:
 
                 self.optimizer.step()
 
-            self.scheduler.step()
-            running_loss += loss.item()
+            # Loss accumulation (원본 loss 사용)
+            self.accumulated_loss += loss.item()
 
-            # 주기적 로그 출력
-            if step % log_every == 0:
-                avg_loss = running_loss / log_every
+            # Update frequency에 따른 실제 optimizer/scheduler step
+            if step % self.update_freq == 0:
+                if (
+                    not self.use_amp
+                ):  # FP32일 때만 여기서 실행 (AMP는 위에서 이미 실행됨)
+                    pass  # AMP에서는 이미 위에서 처리됨
+
+                self.scheduler.step()
+                self.update_step += 1
+
+                # Accumulated loss 평균
+                avg_accumulated_loss = self.accumulated_loss / self.update_freq
+                running_loss += avg_accumulated_loss
+
+                # Reset accumulation
+                self.accumulated_loss = 0.0
+                accumulated_tokens_for_update = self.accumulated_tokens
+                self.accumulated_tokens = 0
+            else:
+                # Gradient accumulation 중일 때는 scheduler step 하지 않음
+                pass
+
+            # 주기적 로그 출력 (실제 업데이트가 발생한 스텝에서만)
+            if step % log_every == 0 and step % self.update_freq == 0:
+                num_updates = log_every // self.update_freq
+                if num_updates > 0:
+                    avg_loss = running_loss / num_updates
+                else:
+                    avg_loss = running_loss  # fallback
+
                 current_tokens = (src != 0).sum().item() + (tgt_input != 0).sum().item()
                 batch_size = src.size(0)
+
+                # WMP (Words/tokens per Minute) 계산
+                current_time = time.time()
+                if self.last_wmp_time is not None:
+                    time_elapsed = current_time - self.last_wmp_time
+                    tokens_since_last = (
+                        self.total_tokens_processed - self.last_wmp_tokens
+                    )
+                    if time_elapsed > 0:
+                        wmp = tokens_since_last / (
+                            time_elapsed / 60.0
+                        )  # tokens per minute
+                    else:
+                        wmp = 0
+                else:
+                    wmp = 0
+
+                # 전체 평균 WMP
+                total_time_elapsed = current_time - self.start_time
+                if total_time_elapsed > 0:
+                    avg_wmp = self.total_tokens_processed / (total_time_elapsed / 60.0)
+                else:
+                    avg_wmp = 0
 
                 # LR 스케줄러 정보
                 lr_info = self.scheduler.get_lr_info()
@@ -563,18 +648,27 @@ class TransformerTrainer:
 
                 print(
                     f"Step {step:5d}/{train_steps} | "
+                    f"Update {self.update_step:5d} | "
                     f"Loss: {avg_loss:.4f} | "
                     f"LR: {lr_info['current_lr']:.2e} ({warmup_status}) | "
-                    f"Batch: {batch_size} sents, {current_tokens} tokens"
+                    f"Batch: {batch_size} sents, {current_tokens} tokens | "
+                    f"WMP: {wmp:.0f} (avg: {avg_wmp:.0f}) | "
+                    f"UF: {self.update_freq}"
                 )
 
                 train_losses.append(avg_loss)
                 steps.append(step)
                 running_loss = 0
 
-            # 평가
-            if step % eval_every == 0:
-                print(f"\n--- Evaluation at step {step} ---")
+                # WMP 추적 변수 업데이트
+                self.last_wmp_time = current_time
+                self.last_wmp_tokens = self.total_tokens_processed
+
+            # 평가 (실제 업데이트가 발생한 스텝에서만)
+            if step % eval_every == 0 and step % self.update_freq == 0:
+                print(
+                    f"\n--- Evaluation at step {step} (update {self.update_step}) ---"
+                )
                 val_loss = self.evaluate()
                 val_losses.append(val_loss)
 
@@ -586,6 +680,7 @@ class TransformerTrainer:
                     torch.save(
                         {
                             "step": step,
+                            "update_step": self.update_step,
                             "model_state_dict": self.model.state_dict(),
                             "optimizer_state_dict": self.optimizer.state_dict(),
                             "scheduler_state_dict": self.scheduler.state_dict(),
@@ -599,12 +694,13 @@ class TransformerTrainer:
                 self.model.train()  # 평가 후 다시 학습 모드로
                 print("-" * 40)
 
-            # 체크포인트 저장
-            if step % save_every == 0:
+            # 체크포인트 저장 (실제 업데이트가 발생한 스텝에서만)
+            if step % save_every == 0 and step % self.update_freq == 0:
                 checkpoint_path = os.path.join(save_dir, f"checkpoint_step_{step}.pth")
                 torch.save(
                     {
                         "step": step,
+                        "update_step": self.update_step,
                         "model_state_dict": self.model.state_dict(),
                         "optimizer_state_dict": self.optimizer.state_dict(),
                         "scheduler_state_dict": self.scheduler.state_dict(),
@@ -612,7 +708,7 @@ class TransformerTrainer:
                     },
                     checkpoint_path,
                 )
-                print(f"Checkpoint saved at step {step}")
+                print(f"Checkpoint saved at step {step} (update {self.update_step})")
 
                 # 체크포인트 관리 (개수 제한)
                 self.manage_checkpoints(checkpoint_path, save_dir)
@@ -739,11 +835,19 @@ class TransformerTrainer:
             self.scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
 
         step = checkpoint.get("step", 0)
+        update_step = checkpoint.get(
+            "update_step", step // self.update_freq
+        )  # 호환성을 위한 fallback
         val_loss = checkpoint.get("val_loss", float("inf"))
+
+        # Update step 복원
+        self.update_step = update_step
 
         print(f"✓ Checkpoint loaded:")
         print(f"  - Step: {step}")
+        print(f"  - Update step: {update_step}")
         print(f"  - Validation loss: {val_loss:.4f}")
+        print(f"  - Update frequency: {self.update_freq}")
 
         return step, val_loss
 

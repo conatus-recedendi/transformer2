@@ -11,14 +11,15 @@
   },
   "training": {
     "train_steps": 400000,
-    "batch_tokens": 6250,
-    "learning_rate": 1e-4,
-    "warmup_steps": 4000,
+    "batch_tokens": 12500,
+    "learning_rate": 5e-4,
+    "warmup_steps": 8000,
     "label_smoothing": 0.1,
     "grad_clip": 1.0,
     "eval_every": 2500,
-    "save_every": 2000,
-    "max_checkpoints": 5
+    "save_every": 5000,
+    "max_checkpoints": 5,
+    "update_freq": 1
   },
   "data": {
     "problem": "wmt14_en_de",
