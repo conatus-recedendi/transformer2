@@ -158,3 +158,65 @@ sample_data = [
 - [Attention Is All You Need](https://arxiv.org/abs/1706.03762)
 - [The Illustrated Transformer](http://jalammar.github.io/illustrated-transformer/)
 - [PyTorch Tutorial](https://pytorch.org/tutorials/beginner/transformer_tutorial.html)
+
+## 사용법
+
+### 새로운 학습 시작
+
+```bash
+# 기본 설정으로 학습 시작
+CUDA_VISIBLE_DEVICES=3 uv run python main.py --config base
+
+# 사용자 정의 설정으로 학습
+uv run python main.py --config base --train_steps 100000 --batch_tokens 8000
+```
+
+### 체크포인트에서 재시작
+
+```bash
+# 체크포인트 폴더에서 자동으로 최신 모델 찾아서 재시작
+uv run python main.py --config base --checkpoint checkpoints_base_20241118_143022
+
+# 특정 GPU 사용하여 재시작
+CUDA_VISIBLE_DEVICES=3 uv run python main.py --config base --checkpoint ./checkpoints
+
+# 특정 스텝부터 재시작 (선택적)
+uv run python main.py --config base --checkpoint ./checkpoints --resume_from_step 50000
+```
+
+### 모델 평가
+
+```bash
+# 최신 체크포인트들을 평균화하여 평가 (Transformer paper 방식)
+uv run python evaluate.py checkpoints/ --data_type validation
+
+# Beam search 설정 조정
+uv run python evaluate.py checkpoints/ --beam_size 8 --length_penalty 0.8
+
+# 단일 체크포인트 평가 (평균화 없이)
+uv run python evaluate.py checkpoints/best_model.pth --no_averaging --no_beam_search
+```
+
+### 사용 가능한 설정 확인
+
+```bash
+# 모든 config 파일 목록 보기
+uv run python main.py --list_configs
+
+# 새로운 config 파일 생성
+uv run python main.py --create_config my_custom_config
+```
+
+## 고급 기능
+
+### 체크포인트 관리
+
+- **자동 재시작**: 체크포인트 폴더 지정 시 자동으로 최신 모델에서 재시작
+- **체크포인트 개수 제한**: config의 `max_checkpoints` 설정으로 저장할 체크포인트 개수 제한
+- **진행률 추적**: 현재 학습 진행 상황과 남은 스텝 수 표시
+
+### 고급 평가
+
+- **체크포인트 평균화**: 최근 N개 체크포인트를 평균화하여 더 안정적인 성능
+- **Beam Search**: 논문과 동일한 설정 (beam_size=4, α=0.6)
+- **다양한 메트릭**: BLEU score, Perplexity, Token accuracy 등
